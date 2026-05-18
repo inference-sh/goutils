@@ -1,4 +1,4 @@
-module inference.sh/goutils
+module github.com/inference-sh/goutils
 
 go 1.25.5
 

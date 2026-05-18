@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"inference.sh/goutils/logging"
+	"github.com/inference-sh/goutils/logging"
 )
 
 // Hub manages all active WebSocket server connections

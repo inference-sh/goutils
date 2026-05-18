@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	"inference.sh/goutils/logging"
+	"github.com/inference-sh/goutils/logging"
 )
 
 // ErrNotConnected is returned when trying to send a message while disconnected

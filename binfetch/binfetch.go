@@ -14,7 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"inference.sh/goutils/progress"
+	"github.com/inference-sh/goutils/progress"
 )
 
 // BinFetchOptions controls DownloadAndInstallBinary.

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/inference-sh/recws"
-	"inference.sh/goutils/logging"
+	"github.com/inference-sh/goutils/logging"
 )
 
 // ClientConnection represents a WebSocket client connection with auto-reconnect

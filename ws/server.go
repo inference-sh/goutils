@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/websocket"
-	"inference.sh/goutils/logging"
+	"github.com/inference-sh/goutils/logging"
 )
 
 // ServerConnection represents a WebSocket server connection

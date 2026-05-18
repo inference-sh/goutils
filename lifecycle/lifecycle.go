@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"time"
 
-	"inference.sh/goutils/logging"
+	"github.com/inference-sh/goutils/logging"
 )
 
 type PanicHandler func(reason any)

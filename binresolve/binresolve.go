@@ -20,8 +20,8 @@ import (
 	"strings"
 	"time"
 
-	"inference.sh/goutils/binfetch"
-	"inference.sh/goutils/updater"
+	"github.com/inference-sh/goutils/binfetch"
+	"github.com/inference-sh/goutils/updater"
 )
 
 // Config controls how the resolver downloads and caches a binary.
