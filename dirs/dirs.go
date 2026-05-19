@@ -44,7 +44,6 @@ func GetLogDirectory() string {
 	return getDirectory(dirConfig{
 		envVar:      "LOG_DIR",
 		dockerPath:  "/logs",
-		rootPath:    "/var/log/" + appDirs.system,
 		xdgVar:      "XDG_DATA_HOME",
 		xdgSubpath:  appDirs.system + "/logs",
 		homeSubpath: "." + appDirs.home + "/logs",
@@ -56,7 +55,6 @@ func GetConfigDirectory() string {
 	return getDirectory(dirConfig{
 		envVar:      "CONFIG_DIR",
 		dockerPath:  "/config",
-		rootPath:    "/etc/" + appDirs.home,
 		xdgVar:      "XDG_CONFIG_HOME",
 		xdgSubpath:  appDirs.home,
 		homeSubpath: ".config/" + appDirs.home,
@@ -68,7 +66,6 @@ func GetCacheDirectory() string {
 	return getDirectory(dirConfig{
 		envVar:      "CACHE_DIR",
 		dockerPath:  "/cache",
-		rootPath:    "/var/cache/" + appDirs.system,
 		xdgVar:      "XDG_CACHE_HOME",
 		xdgSubpath:  appDirs.system,
 		homeSubpath: ".cache/" + appDirs.home,
@@ -79,7 +76,6 @@ func GetCacheDirectory() string {
 type dirConfig struct {
 	envVar      string
 	dockerPath  string
-	rootPath    string
 	xdgVar      string
 	xdgSubpath  string
 	homeSubpath string
@@ -95,15 +91,11 @@ func getDirectory(cfg dirConfig) string {
 	if dir := os.Getenv(cfg.envVar); dir != "" {
 		return dir
 	}
-	// Root user
-	if os.Geteuid() == 0 {
-		return cfg.rootPath
-	}
 	// XDG base directory
 	if xdg := os.Getenv(cfg.xdgVar); xdg != "" {
 		return filepath.Join(xdg, cfg.xdgSubpath)
 	}
-	// Home directory
+	// Home directory (works for both root and non-root)
 	if home := GetUserHomeDir(); home != "" {
 		return filepath.Join(home, cfg.homeSubpath)
 	}
