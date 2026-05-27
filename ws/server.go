@@ -7,12 +7,14 @@ import (
 	"net/http"
 
 	"github.com/gorilla/websocket"
+	idgen "github.com/inference-sh/goutils/id"
 	"github.com/inference-sh/goutils/logging"
 )
 
 // ServerConnection represents a WebSocket server connection
 type ServerConnection struct {
 	BaseConnection
+	ID       string
 	conn     *websocket.Conn
 	sendChan chan *sendOp
 	done     chan struct{}
@@ -36,8 +38,11 @@ func NewServerConnection(w http.ResponseWriter, r *http.Request) (*ServerConnect
 		return nil, fmt.Errorf("failed to upgrade connection: %w", err)
 	}
 
+	connID := idgen.GenerateShortID(8)
+
 	c := &ServerConnection{
 		BaseConnection: NewBaseConnection(r.Context()),
+		ID:             connID,
 		conn:           conn,
 		sendChan:       make(chan *sendOp),
 		done:           make(chan struct{}),
@@ -95,7 +100,7 @@ func (c *ServerConnection) sendLoop() {
 
 // Listen starts listening for incoming messages
 func (c *ServerConnection) Listen(ctx context.Context) {
-	logging.Info("ws").Msgf( "Starting WebSocket server listener")
+	logging.Info("ws").Msgf("Starting WebSocket server listener conn_id=%s", c.ID)
 	defer c.Close()
 
 	// Start message processor
@@ -114,7 +119,7 @@ func (c *ServerConnection) Listen(ctx context.Context) {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					return
 				}
-				logging.Error("ws").Msgf( "Error reading message: %v", err)
+				logging.Error("ws").Msgf("Error reading message conn_id=%s: %v", c.ID, err)
 				return
 			}
 

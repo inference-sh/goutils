@@ -81,6 +81,13 @@ func (h *Hub) startTTLRefresh() {
 
 // Register adds a server connection to the hub with an identifier
 func (h *Hub) Register(id string, conn *ServerConnection) {
+	if prev, loaded := h.connections.Load(id); loaded {
+		if sc, ok := prev.(*ServerConnection); ok {
+			logging.Info("ws").Msgf("Replacing connection for %s: old_conn=%s new_conn=%s", id, sc.ID, conn.ID)
+		}
+	} else {
+		logging.Info("ws").Msgf("Registering connection for %s: conn_id=%s", id, conn.ID)
+	}
 	h.connections.Store(id, conn)
 	h.ttlMu.Lock()
 	h.ttlKeys[id] = struct{}{}
@@ -99,15 +106,19 @@ func (h *Hub) Unregister(id string, conn *ServerConnection) {
 		// Only unregister if this is still the active connection
 		current, loaded := h.connections.Load(id)
 		if !loaded || current != conn {
+			logging.Info("ws").Msgf("Skipping unregister for %s: conn_id=%s was already replaced", id, conn.ID)
 			return // Connection was replaced by a newer one
 		}
 	}
 
+	connID := ""
 	if c, ok := h.connections.LoadAndDelete(id); ok {
 		if sc, ok := c.(*ServerConnection); ok {
+			connID = sc.ID
 			sc.Close()
 		}
 	}
+	logging.Info("ws").Msgf("Unregistered connection for %s: conn_id=%s", id, connID)
 	h.ttlMu.Lock()
 	delete(h.ttlKeys, id)
 	h.ttlMu.Unlock()
