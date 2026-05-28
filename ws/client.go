@@ -209,7 +209,9 @@ func (c *ClientConnection) Close() error {
 		return nil
 	default:
 		close(c.done)
-		c.conn.Close()
+		// Send a proper close frame so the server sees a clean disconnect
+		// instead of a 1006 abnormal closure.
+		c.conn.Shutdown(5 * time.Second)
 		return nil
 	}
 }
