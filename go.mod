@@ -6,7 +6,7 @@ require (
 	github.com/anandvarma/namegen v1.1.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/gosimple/slug v1.15.0
-	github.com/inference-sh/recws v1.6.1
+	github.com/inference-sh/recws v1.6.2
 	github.com/json-iterator/go v1.1.12
 	github.com/oklog/ulid/v2 v2.1.0
 	github.com/redis/go-redis/v9 v9.11.0
