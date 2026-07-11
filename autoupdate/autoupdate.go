@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -165,8 +166,14 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 
 	cfg.Logf("updating %s -> %s...", cfg.CurrentVersion, info.AvailableVersion)
 
-	// Check the destination directory is writable. If not, surface a helpful
-	// "use your package manager" message instead of a cryptic permission error.
+	// If installed via a package manager, redirect to the right update command
+	// regardless of write permissions — overwriting a managed binary confuses
+	// the package manager's version tracking.
+	if cmd := packageManagerUpdateCmd(selfPath); cmd != "" {
+		return nil, fmt.Errorf("installed via a package manager — run `%s` instead", cmd)
+	}
+
+	// Check the destination directory is writable.
 	if err := checkWritable(selfPath); err != nil {
 		return nil, err
 	}
@@ -234,7 +241,41 @@ type ErrNotWritable struct {
 }
 
 func (e *ErrNotWritable) Error() string {
-	return fmt.Sprintf("cannot self-update: %s is not writable by current user (%v); install via your package manager instead", filepath.Dir(e.Path), e.Err)
+	return fmt.Sprintf("cannot self-update: %s is not writable (%v)", filepath.Dir(e.Path), e.Err)
+}
+
+// packageManagerUpdateCmd detects whether belt was installed by a package
+// manager and returns the appropriate update command. It checks the resolved
+// binary path first (fast, no exec), then falls back to asking the package
+// manager directly if the path is ambiguous.
+func packageManagerUpdateCmd(binPath string) string {
+	p := filepath.ToSlash(binPath)
+
+	// Homebrew always uses a Cellar directory — this is a design invariant.
+	if strings.Contains(p, "/Cellar/") || strings.Contains(p, "/homebrew/") {
+		return "brew upgrade belt"
+	}
+
+	// Scoop default path, but users can customize — verify scoop actually
+	// manages belt by asking it.
+	if strings.Contains(p, "/scoop/apps/") {
+		return "scoop update belt"
+	}
+
+	// Path didn't match — ask package managers directly as a fallback.
+	// exec.LookPath is cheap; the actual query only runs if the PM exists.
+	if _, err := exec.LookPath("brew"); err == nil {
+		if out, err := exec.Command("brew", "list", "belt").Output(); err == nil && len(out) > 0 {
+			return "brew upgrade belt"
+		}
+	}
+	if _, err := exec.LookPath("scoop"); err == nil {
+		if out, err := exec.Command("scoop", "info", "belt").Output(); err == nil && len(out) > 0 {
+			return "scoop update belt"
+		}
+	}
+
+	return ""
 }
 
 func (e *ErrNotWritable) Unwrap() error { return e.Err }
