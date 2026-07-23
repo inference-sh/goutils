@@ -26,7 +26,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -85,6 +84,10 @@ type Result struct {
 	UpdateAvailable bool   // whether the manifest advertised a newer version
 	FromVersion     string
 	ToVersion       string
+	// PackageManager is set when the binary was installed via a package manager
+	// (e.g. "brew upgrade belt"). Self-update is skipped; the caller should
+	// surface this command to the user instead.
+	PackageManager string
 	// ReexecAttempted is true if we reached the re-exec step. On Unix this
 	// never actually returns on success (the syscall replaces the process),
 	// so seeing ReexecAttempted=true in the returned Result implies the exec
@@ -164,14 +167,19 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("locate current binary: %w", err)
 	}
 
-	cfg.Logf("updating %s -> %s...", cfg.CurrentVersion, info.AvailableVersion)
-
-	// If installed via a package manager, redirect to the right update command
-	// regardless of write permissions — overwriting a managed binary confuses
-	// the package manager's version tracking.
+	// If installed via a package manager, don't attempt self-update —
+	// overwriting a managed binary confuses the package manager's version
+	// tracking. Return the update info so callers can surface it.
 	if cmd := packageManagerUpdateCmd(selfPath); cmd != "" {
-		return nil, fmt.Errorf("installed via a package manager — run `%s` instead", cmd)
+		return &Result{
+			UpdateAvailable: true,
+			FromVersion:     cfg.CurrentVersion,
+			ToVersion:       info.AvailableVersion,
+			PackageManager:  cmd,
+		}, nil
 	}
+
+	cfg.Logf("updating %s -> %s...", cfg.CurrentVersion, info.AvailableVersion)
 
 	// Check the destination directory is writable.
 	if err := checkWritable(selfPath); err != nil {
@@ -244,35 +252,29 @@ func (e *ErrNotWritable) Error() string {
 	return fmt.Sprintf("cannot self-update: %s is not writable (%v)", filepath.Dir(e.Path), e.Err)
 }
 
-// packageManagerUpdateCmd detects whether belt was installed by a package
-// manager and returns the appropriate update command. It checks the resolved
+// PackageManagerUpdateCmd detects whether belt was installed by a package
+// manager and returns the appropriate update command (e.g. "brew upgrade belt").
+// Returns "" if no package manager owns the binary. It checks the resolved
 // binary path first (fast, no exec), then falls back to asking the package
 // manager directly if the path is ambiguous.
+func PackageManagerUpdateCmd(binPath string) string {
+	return packageManagerUpdateCmd(binPath)
+}
+
 func packageManagerUpdateCmd(binPath string) string {
 	p := filepath.ToSlash(binPath)
 
-	// Homebrew always uses a Cellar directory — this is a design invariant.
+	// The resolved binary path is the ground truth. Package managers install
+	// into well-known directory structures — if the path doesn't match, this
+	// is a direct install and we should self-update regardless of what package
+	// managers happen to be installed on the system.
+
 	if strings.Contains(p, "/Cellar/") || strings.Contains(p, "/homebrew/") {
 		return "brew upgrade belt"
 	}
 
-	// Scoop default path, but users can customize — verify scoop actually
-	// manages belt by asking it.
 	if strings.Contains(p, "/scoop/apps/") {
 		return "scoop update belt"
-	}
-
-	// Path didn't match — ask package managers directly as a fallback.
-	// exec.LookPath is cheap; the actual query only runs if the PM exists.
-	if _, err := exec.LookPath("brew"); err == nil {
-		if out, err := exec.Command("brew", "list", "belt").Output(); err == nil && len(out) > 0 {
-			return "brew upgrade belt"
-		}
-	}
-	if _, err := exec.LookPath("scoop"); err == nil {
-		if out, err := exec.Command("scoop", "info", "belt").Output(); err == nil && len(out) > 0 {
-			return "scoop update belt"
-		}
 	}
 
 	return ""
