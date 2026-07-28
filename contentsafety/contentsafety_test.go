@@ -178,3 +178,47 @@ func TestTruncateMatch_boundsReportedMatch(t *testing.T) {
 		t.Error("truncated match should be marked with an ellipsis")
 	}
 }
+
+// The literal prescan must never hide a secret. Every family is checked with
+// the credential buried in a large body, which is the case the prescan changes.
+func TestClean_prefilterNeverHidesASecret(t *testing.T) {
+	pad := strings.Repeat("ordinary prose about gardening. ", 4000)
+	cases := map[string]struct {
+		secret string
+		sets   RuleSet
+	}{
+		"belt key":       {"1nfsh-01j8x2k4m5n6p7q8r9s0t1v2w3", Credentials},
+		"anthropic":      {"sk-ant-api03-" + strings.Repeat("a", 24), Credentials},
+		"aws":            {"AKIAIOSFODNN7EXAMPLE", Credentials},
+		"github":         {"ghp_" + strings.Repeat("b", 36), Credentials},
+		"chat delimiter": {"<|im_start|>", SpecialTokens},
+		"llama inst":     {"[INST]", SpecialTokens},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			cleaned, found := Clean(pad+" "+c.secret+" "+pad, c.sets)
+			if strings.Contains(cleaned, c.secret) {
+				t.Error("secret survived a large body")
+			}
+			if len(found) == 0 {
+				t.Error("no finding reported")
+			}
+		})
+	}
+}
+
+func TestLiteralAnchor(t *testing.T) {
+	cases := map[string]string{
+		`\b1nfsh-[0-9a-hjkmnp-tv-z]{26}\b`:     "1nfsh-",
+		`\bghp_[0-9a-zA-Z]{36}\b`:              "ghp_",
+		`<\|im_start\|>`:                       "<|im_start|>",
+		`\[/?INST\]`:                           "", // optional quantifier right after "["
+		`\b(?:A3T[A-Z0-9]|AKIA)[A-Z2-7]{16}\b`: "", // opens with an alternation
+		`(?i)\bhf_[a-z]{34}\b`:                 "hf_",
+	}
+	for expr, want := range cases {
+		if got := literalAnchor(expr); got != want {
+			t.Errorf("literalAnchor(%q) = %q, want %q", expr, got, want)
+		}
+	}
+}

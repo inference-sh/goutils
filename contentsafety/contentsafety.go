@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 // RuleSet selects which families of rules to apply. Values are bit flags, so a
@@ -124,14 +125,35 @@ func detectInto(result *Result, path, content string, sets RuleSet) {
 // matching across a string boundary consumes the closing quote and corrupts the
 // document. Use CleanJSON, which walks decoded string values individually.
 func Clean(content string, sets RuleSet) (string, []Finding) {
+	// Rewriting means one full scan per pattern, and there are ~30 CleanSafe
+	// patterns. Content with no credential in it — which is almost all content —
+	// paid for all of them: scrubbing ran at ~0.6 MB/s, so a 16 MB body took 14
+	// seconds. One combined alternation decides in a single pass whether any
+	// pattern can match, and only then is the per-pattern loop worth running to
+	// attribute matches accurately.
 	var findings []Finding
 	corpus := allRules()
+	lower := ""
 	for i := range corpus {
 		r := &corpus[i]
 		if r.Sets&sets == 0 || r.Verbs&CleanSafe == 0 {
 			continue
 		}
 		for _, pattern := range r.Patterns {
+			if lit := patternAnchor(pattern); lit != "" {
+				if strings.Contains(content, lit) {
+					// present, fall through and match properly
+				} else if hasUpper(lit) {
+					continue // case-sensitive literal, definitively absent
+				} else {
+					if lower == "" {
+						lower = strings.ToLower(content)
+					}
+					if !strings.Contains(lower, lit) {
+						continue
+					}
+				}
+			}
 			content = replaceReporting(content, pattern, r, &findings)
 		}
 	}
@@ -181,4 +203,74 @@ func Normalize(s string) string {
 		lines[i] = normalizeLine(line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// patternAnchor returns a literal substring every match of a pattern must
+// contain, or "" when none can be derived.
+//
+// Matching costs ~30 MB/s per pattern because of the \b boundaries, and there
+// are ~30 rewritable patterns, so content with no credential in it — nearly all
+// content — was paying ~1 s per megabyte for thirty scans that could not match.
+// Every pattern in these families is anchored on a distinctive literal, which is
+// the same property that makes it safe to rewrite at all, so a substring search
+// rules most of them out at memchr speed.
+//
+// Derived from the pattern rather than declared alongside it: a hand-maintained
+// literal can drift from the regex it is meant to describe, and a wrong one here
+// would silently stop scrubbing.
+func patternAnchor(p *regexp.Regexp) string {
+	if got, ok := anchors.Load(p); ok {
+		return got.(string)
+	}
+	a := literalAnchor(p.String())
+	anchors.Store(p, a)
+	return a
+}
+
+var anchors sync.Map // *regexp.Regexp -> string
+
+// literalAnchor reads the leading run of plain characters of a regex source,
+// stopping at the first metacharacter, so `\b1nfsh-[0-9a-z]{26}\b` yields
+// "1nfsh-". Returns "" when the pattern opens with an alternation or a class,
+// in which case that pattern is always matched.
+func literalAnchor(expr string) string {
+	expr = strings.TrimPrefix(expr, "(?i)")
+	expr = strings.TrimPrefix(expr, `\b`)
+	var b strings.Builder
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		if c == '\\' {
+			// An escaped punctuation character is a literal — `\|` is a pipe. An
+			// escaped letter or digit is a character class (\w, \d, \b) and is
+			// not, so the literal run ends there.
+			if i+1 >= len(expr) {
+				break
+			}
+			n := expr[i+1]
+			if (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z') || (n >= '0' && n <= '9') {
+				break
+			}
+			b.WriteByte(n)
+			i++
+			continue
+		}
+		if strings.IndexByte("[](){}.*+?|^$", c) >= 0 {
+			break
+		}
+		b.WriteByte(c)
+	}
+	// Fewer than three characters is too weak to rule anything out.
+	if b.Len() < 3 {
+		return ""
+	}
+	return b.String()
+}
+
+func hasUpper(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 'A' && s[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
 }
