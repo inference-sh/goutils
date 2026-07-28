@@ -185,3 +185,24 @@ func TestWrapJSON_doesNotOverwriteExistingMarker(t *testing.T) {
 		t.Errorf("existing marker was overwritten: %v", marker)
 	}
 }
+
+// A list response has an array root with nowhere to carry the marker. It moves
+// under an envelope rather than being re-encoded as a JSON string, which would
+// change its type and force consumers to decode twice.
+func TestWrapJSON_arrayRootGetsAnEnvelope(t *testing.T) {
+	enable(t)
+
+	out := WrapJSON("belt mcp list", []byte(`[{"id":"a"},{"id":"b"}]`))
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("array root produced invalid JSON: %v\n%s", err, out)
+	}
+	if got["externalContent"].(map[string]any)["source"] != "belt mcp list" {
+		t.Errorf("missing provenance: %s", out)
+	}
+	items, ok := got["content"].([]any)
+	if !ok || len(items) != 2 {
+		t.Errorf("payload should stay an array under content: %s", out)
+	}
+}

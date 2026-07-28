@@ -102,18 +102,24 @@ func WrapJSON(source string, raw json.RawMessage) json.RawMessage {
 	}
 	obj, ok := tree.(map[string]any)
 	if !ok {
-		// A non-object root has nowhere to carry the marker. Wrapping the
-		// serialized form as text keeps it marked rather than silently
-		// returning it unlabelled; the result is a JSON string, still parseable.
-		return mustJSONString(Wrap(source, string(cleaned)))
+		// A non-object root — an array, typically a list response — has nowhere
+		// to carry the marker, so it moves under an envelope. That is a shape
+		// change, but a caller passing --wrap-untrusted has asked for provenance
+		// and the alternative was worse: the previous fallback re-encoded the
+		// document as a JSON *string*, changing its type and forcing consumers
+		// to double-decode.
+		envelope := map[string]any{
+			"externalContent": marker(source, findings),
+			"content":         tree,
+		}
+		out, err := json.Marshal(envelope)
+		if err != nil {
+			return cleaned
+		}
+		return out
 	}
 	if _, exists := obj["externalContent"]; !exists {
-		obj["externalContent"] = map[string]any{
-			"untrusted":   true,
-			"source":      source,
-			"notice":      securityNotice,
-			"neutralized": len(findings),
-		}
+		obj["externalContent"] = marker(source, findings)
 	}
 
 	out, err := json.Marshal(obj)
@@ -134,12 +140,14 @@ func Neutralize(content string) string {
 	return cleaned
 }
 
-func mustJSONString(s string) []byte {
-	b, err := json.Marshal(s)
-	if err != nil {
-		return []byte(`""`)
+// marker is the provenance object stamped onto wrapped output.
+func marker(source string, findings []contentsafety.Finding) map[string]any {
+	return map[string]any{
+		"untrusted":   true,
+		"source":      source,
+		"notice":      securityNotice,
+		"neutralized": len(findings),
 	}
-	return b
 }
 
 func newNonce() string {
