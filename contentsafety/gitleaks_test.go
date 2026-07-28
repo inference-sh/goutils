@@ -139,7 +139,7 @@ func TestLiveRedactionPatterns_FallbackOnFetchFailure(t *testing.T) {
 	t.Cleanup(func() { gitleaksConfigURL = origURL })
 
 	patterns := LiveRedactionPatterns()
-	assert.Equal(t, redactionPatterns, patterns)
+	assert.Equal(t, redactionPatterns(), patterns)
 }
 
 func TestLiveRedactionPatterns_GitleaksDisabled(t *testing.T) {
@@ -147,7 +147,7 @@ func TestLiveRedactionPatterns_GitleaksDisabled(t *testing.T) {
 
 	// gitleaks fetch is disabled — should only return hardcoded patterns
 	patterns := LiveRedactionPatterns()
-	require.Equal(t, len(patterns), len(redactionPatterns))
+	require.Equal(t, len(patterns), len(redactionPatterns()))
 }
 
 func TestReloadGitleaksPatterns(t *testing.T) {

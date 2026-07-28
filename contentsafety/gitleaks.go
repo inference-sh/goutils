@@ -44,7 +44,7 @@ func LiveRedactionPatterns() []*regexp.Regexp {
 		// redactOutput. hardcoded patterns only until we have a proper allowlist.
 		// fetched := fetchGitleaksPatterns()
 		livePatternsMu.Lock()
-		livePatterns = redactionPatterns
+		livePatterns = redactionPatterns()
 		livePatternsMu.Unlock()
 		logging.Info("api").Msg("gitleaks: disabled, using hardcoded patterns only")
 	})
@@ -143,7 +143,7 @@ func ReloadGitleaksPatterns() (int, error) {
 		return 0, fmt.Errorf("failed to fetch gitleaks patterns")
 	}
 	livePatternsMu.Lock()
-	livePatterns = append(redactionPatterns, fetched...)
+	livePatterns = append(redactionPatterns(), fetched...)
 	livePatternsMu.Unlock()
 	return len(fetched), nil
 }

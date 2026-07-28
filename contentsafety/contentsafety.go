@@ -125,8 +125,9 @@ func detectInto(result *Result, path, content string, sets RuleSet) {
 // document. Use CleanJSON, which walks decoded string values individually.
 func Clean(content string, sets RuleSet) (string, []Finding) {
 	var findings []Finding
-	for i := range rules {
-		r := &rules[i]
+	corpus := allRules()
+	for i := range corpus {
+		r := &corpus[i]
 		if r.Sets&sets == 0 || r.Verbs&CleanSafe == 0 {
 			continue
 		}
