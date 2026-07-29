@@ -215,10 +215,79 @@ func TestLiteralAnchor(t *testing.T) {
 		`\[/?INST\]`:                           "", // optional quantifier right after "["
 		`\b(?:A3T[A-Z0-9]|AKIA)[A-Z2-7]{16}\b`: "", // opens with an alternation
 		`(?i)\bhf_[a-z]{34}\b`:                 "hf_",
+		// "/" is optional, so it must not appear in the anchor; what remains is
+		// "<<", below the minimum, so the pattern gets no prescan and always
+		// runs. Anchoring on "<</" instead skipped the rule and let "<<SYS>>"
+		// through untouched.
+		`<</?SYS>>`: "",
+		// A quantifier applying to an escaped literal drops it just the same.
+		`ab\|?cd`: "",
 	}
 	for expr, want := range cases {
 		if got := literalAnchor(expr); got != want {
 			t.Errorf("literalAnchor(%q) = %q, want %q", expr, got, want)
 		}
 	}
+}
+
+// The prescan is a correctness-critical optimization: an anchor no match can
+// contain does not merely slow the rule down, it disables it. This walks every
+// compiled pattern in the corpus and checks the invariant directly — the anchor
+// must appear in a string the pattern itself matches.
+func TestLiteralAnchor_neverExcludesAMatch(t *testing.T) {
+	for _, r := range allRules() {
+		for _, p := range r.Patterns {
+			anchor := literalAnchor(p.String())
+			if anchor == "" {
+				continue // no prescan, nothing to get wrong
+			}
+			sample, ok := patternSample(p.String())
+			if !ok {
+				continue
+			}
+			if !p.MatchString(sample) {
+				t.Errorf("%s: sample %q does not match its own pattern %q",
+					r.ID, sample, p.String())
+				continue
+			}
+			if !strings.Contains(sample, anchor) {
+				t.Errorf("%s: anchor %q is absent from %q, which the pattern matches — "+
+					"the prescan would skip this rule",
+					r.ID, anchor, sample)
+			}
+		}
+	}
+}
+
+// patternSample renders a pattern that is a pure literal once its optional
+// groups are dropped, which covers the special-token delimiters. Patterns with
+// character classes or repetition are reported as unsupported rather than
+// guessed at.
+func patternSample(expr string) (string, bool) {
+	expr = strings.TrimPrefix(expr, "(?i)")
+	var b strings.Builder
+	for i := 0; i < len(expr); i++ {
+		switch c := expr[i]; {
+		case c == '\\':
+			if i+1 >= len(expr) {
+				return "", false
+			}
+			n := expr[i+1]
+			if (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z') || (n >= '0' && n <= '9') {
+				return "", false // \b, \d, \w — not a literal
+			}
+			b.WriteByte(n)
+			i++
+		case c == '?':
+			// Drop the preceding character: the shortest match omits it.
+			s := b.String()
+			b.Reset()
+			b.WriteString(s[:len(s)-1])
+		case strings.IndexByte("[](){}.*+|^$", c) >= 0:
+			return "", false
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), b.Len() > 0
 }

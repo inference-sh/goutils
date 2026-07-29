@@ -1,6 +1,9 @@
 package contentsafety
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Key classification decides, per JSON field, whether a string is content an
 // agent will read or metadata a program depends on.
@@ -73,6 +76,28 @@ var containerKeys = map[string]bool{
 	"findings": true, "suggestions": true, "tools": true, "content": true,
 }
 
+// secretKeys are fields whose value is credential material because of what the
+// field is, not what the value looks like. Pattern matching cannot reach these:
+// a masked secret, a random passphrase or an opaque OAuth token resembles no
+// vendor format, so a value-only scrubber passes it through untouched.
+//
+// Only unambiguous names belong here. "key" and "value" are deliberately absent
+// — both are ordinary field names across belt's payloads ("key" is a secret's
+// *name*, "value" appears throughout flow graphs), and redacting them would
+// destroy useful data to protect something that is not there.
+var secretKeys = map[string]bool{
+	"secret": true, "secrets": true, "client_secret": true,
+	"password": true, "passwd": true, "pwd": true, "passcode": true,
+	"token": true, "access_token": true, "refresh_token": true,
+	"id_token": true, "session_token": true, "bearer": true,
+	"api_key": true, "private_key": true, "secret_key": true,
+	"credential": true, "credentials": true, "authorization": true,
+	"cookie": true, "set_cookie": true,
+	// A masked value still exposes its last four characters, which is enough to
+	// be worth withholding when the payload is written to a committed fixture.
+	"masked_value": true,
+}
+
 // KeyClass describes how a JSON string value should be treated.
 type KeyClass int
 
@@ -83,6 +108,9 @@ const (
 	// ClassMetadata is an identifier or machine value. Left untouched so
 	// programs consuming the output keep working.
 	ClassMetadata
+	// ClassSecret is credential material identified by its field name. Always
+	// redacted, whatever the value looks like.
+	ClassSecret
 )
 
 // ClassifyKey reports how the value at key, reached through path, should be
@@ -91,6 +119,11 @@ const (
 func ClassifyKey(path []string, key string) KeyClass {
 	k := normalizeKey(key)
 
+	// Checked first: a field named for a secret is a secret even when another
+	// table also claims the name.
+	if secretKeys[k] {
+		return ClassSecret
+	}
 	if metadataKeys[k] {
 		return ClassMetadata
 	}
@@ -130,4 +163,53 @@ func normalizeKey(key string) string {
 		}
 	}
 	return b.String()
+}
+
+// jsonFieldRe matches a JSON string field and captures its name, the separator,
+// and the value. Bounded name and value character sets keep it linear and stop a
+// match from spanning two fields.
+var jsonFieldRe = regexp.MustCompile(`"([A-Za-z0-9_.\-]{1,64})"(\s*:\s*)"((?:[^"\\]|\\.)*)"`)
+
+// RedactSecretFields replaces the value of every JSON field whose name denotes
+// secret material, without decoding the document.
+//
+// It exists for callers that cannot re-encode. Recorded HTTP chunks are
+// arbitrary byte fragments whose boundaries are the thing being reproduced, so
+// decoding and re-serializing them would rewrite whitespace and move a boundary;
+// a text substitution changes only the matched span. CleanJSON is the better
+// choice whenever re-encoding is acceptable.
+//
+// The field name is classified rather than matched against a list of spellings,
+// so maskedValue, masked_value and masked-value are all covered.
+//
+// Same limitation as the value patterns: a field split across two fragments is
+// not matched.
+func RedactSecretFields(s string) (string, []Finding) {
+	matches := jsonFieldRe.FindAllStringSubmatchIndex(s, -1)
+	if matches == nil {
+		return s, nil
+	}
+
+	var b strings.Builder
+	var findings []Finding
+	last := 0
+	for _, m := range matches {
+		name := s[m[2]:m[3]]
+		if ClassifyKey(nil, name) != ClassSecret || m[7] == m[6] {
+			continue // not secret, or already empty
+		}
+		b.WriteString(s[last:m[6]])
+		b.WriteString(redactedCredential)
+		last = m[7]
+		findings = append(findings, Finding{
+			RuleID:   "INF-CRED-005",
+			Severity: SeverityCritical,
+			Match:    name,
+		})
+	}
+	if findings == nil {
+		return s, nil
+	}
+	b.WriteString(s[last:])
+	return b.String(), findings
 }

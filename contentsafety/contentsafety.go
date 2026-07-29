@@ -236,9 +236,21 @@ var anchors sync.Map // *regexp.Regexp -> string
 func literalAnchor(expr string) string {
 	expr = strings.TrimPrefix(expr, "(?i)")
 	expr = strings.TrimPrefix(expr, `\b`)
-	var b strings.Builder
+	var b []byte
 	for i := 0; i < len(expr); i++ {
 		c := expr[i]
+
+		// A quantifier that permits zero repetitions makes the character before
+		// it optional, so that character cannot be required in a match. Keeping
+		// it produced an anchor no match contains, and since a missing anchor
+		// skips the rule outright, the pattern stopped matching anything at all:
+		// `<</?SYS>>` anchored on "<</" and stopped stripping "<<SYS>>".
+		if c == '?' || c == '*' || c == '{' {
+			if len(b) > 0 {
+				b = b[:len(b)-1]
+			}
+			break
+		}
 		if c == '\\' {
 			// An escaped punctuation character is a literal — `\|` is a pipe. An
 			// escaped letter or digit is a character class (\w, \d, \b) and is
@@ -250,20 +262,24 @@ func literalAnchor(expr string) string {
 			if (n >= 'a' && n <= 'z') || (n >= 'A' && n <= 'Z') || (n >= '0' && n <= '9') {
 				break
 			}
-			b.WriteByte(n)
+			// A quantifier may follow the escaped literal too: `\|?`.
+			if i+2 < len(expr) && (expr[i+2] == '?' || expr[i+2] == '*' || expr[i+2] == '{') {
+				break
+			}
+			b = append(b, n)
 			i++
 			continue
 		}
-		if strings.IndexByte("[](){}.*+?|^$", c) >= 0 {
+		if strings.IndexByte("[](){}.+|^$", c) >= 0 {
 			break
 		}
-		b.WriteByte(c)
+		b = append(b, c)
 	}
 	// Fewer than three characters is too weak to rule anything out.
-	if b.Len() < 3 {
+	if len(b) < 3 {
 		return ""
 	}
-	return b.String()
+	return string(b)
 }
 
 func hasUpper(s string) bool {

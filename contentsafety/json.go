@@ -19,12 +19,27 @@ import (
 // Fields classified as metadata are skipped, so ids, URIs, hashes, and cursors
 // survive intact for programs consuming the output.
 //
+// Fields classified as secret are redacted whole, without consulting the
+// patterns. Their value is credential material because of the field it sits in,
+// so it need not resemble any known credential format to be worth withholding —
+// which is exactly the case a value-only scrubber misses.
+//
 // The input is not modified: decoding produces a fresh tree for deepmap to
 // rewrite in place.
 func CleanJSON(raw json.RawMessage, sets RuleSet) (json.RawMessage, []Finding) {
 	return transformJSON(raw, func(path []string, key, value string) (string, []Finding) {
-		if ClassifyKey(path, key) == ClassMetadata {
+		switch ClassifyKey(path, key) {
+		case ClassMetadata:
 			return value, nil
+		case ClassSecret:
+			if value == "" {
+				return value, nil
+			}
+			return redactedCredential, []Finding{{
+				RuleID:   "INF-CRED-005",
+				Severity: SeverityCritical,
+				Match:    key,
+			}}
 		}
 		return Clean(value, sets)
 	})
