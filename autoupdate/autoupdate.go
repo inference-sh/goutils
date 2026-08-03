@@ -52,6 +52,10 @@ type Config struct {
 	// touching the network. Zero disables rate limiting (always check).
 	CheckInterval time.Duration
 
+	// Force overrides the dev-build and rate-limit guards so the update
+	// check always hits the network. Useful for escaping a dev build.
+	Force bool
+
 	// DisabledEnv is the name of an environment variable that, when set to
 	// any non-empty value, disables auto-update. Typical: "INFSH_NO_AUTOUPDATE".
 	DisabledEnv string
@@ -114,7 +118,7 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 		}
 	}
 
-	if isDevVersion(cfg.CurrentVersion) {
+	if !cfg.Force && isDevVersion(cfg.CurrentVersion) {
 		return &Result{Skipped: true, SkipReason: "dev build"}, nil
 	}
 
