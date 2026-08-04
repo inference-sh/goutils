@@ -16,19 +16,24 @@ jobs:
       - run: go test ./...
 
       - name: Warm Go module proxy
-        run: GONOSUMCHECK= go get github.com/inference-sh/goutils@${GITHUB_REF_NAME}
+        run: |
+          curl -sf "https://proxy.golang.org/github.com/inference-sh/goutils/@v/${GITHUB_REF_NAME}.info" > /dev/null
 
       - name: Update downstream consumers
         env:
           GH_TOKEN: ${{ secrets.REPO_PAT }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          REPOS="inference-sh/api inference-sh/cli inference-sh/engine inference-sh/uploader"
-          for repo in $REPOS; do
-            echo "--- $repo ---"
-            gh workflow run update-dep.yml \
-              --repo "$repo" \
-              --field module=github.com/inference-sh/goutils \
-              --field version="$TAG" \
-              2>/dev/null || echo "  skipped (no update-dep workflow yet)"
-          done
+          dispatch() {
+            local repo=$1
+            echo "Dispatching to $repo..."
+            curl -sf -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo/actions/workflows/update-dep.yml/dispatches" \
+              -d "{\"ref\":\"dev\",\"inputs\":{\"module\":\"github.com/inference-sh/goutils\",\"version\":\"${GITHUB_REF_NAME}\"}}" || true
+          }
+
+          dispatch inference-sh/api
+          dispatch inference-sh/cli
+          dispatch inference-sh/engine
+          dispatch inference-sh/uploader
