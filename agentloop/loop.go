@@ -7,24 +7,16 @@ import (
 	"sync/atomic"
 )
 
-// Loop is the core agent turn loop. It alternates between LLM calls and tool
-// execution until the agent is done, an error occurs, or the context is
-// cancelled.
+// Loop is a synchronous driver for Session. It calls StreamFn and
+// ToolExecutor in a blocking for-loop — suitable for CLI agents.
 //
-// Create with New, configure with options, then call Run.
+// For async/event-driven agents (servers), use Session directly and
+// drive it from your event handlers.
 type Loop struct {
-	streamFn     StreamFn
-	executor     ToolExecutor
-	hooks        Hooks
-	systemPrompt string
-	tools        []ToolDef
-	params       any
-	maxTurns     int
-	toolExec     ToolExecutionMode
-	compaction   *CompactionConfig
-
-	steering *messageQueue
-	followUp *messageQueue
+	session  *Session
+	streamFn StreamFn
+	executor ToolExecutor
+	toolExec ToolExecutionMode
 
 	mu      sync.Mutex
 	running bool
@@ -41,25 +33,29 @@ const (
 // Option configures a Loop.
 type Option func(*Loop)
 
-func WithHooks(h Hooks) Option                      { return func(l *Loop) { l.hooks = h } }
-func WithSystemPrompt(s string) Option              { return func(l *Loop) { l.systemPrompt = s } }
-func WithTools(t []ToolDef) Option                  { return func(l *Loop) { l.tools = t } }
-func WithMaxTurns(n int) Option                     { return func(l *Loop) { l.maxTurns = n } }
-func WithSteeringMode(m QueueMode) Option           { return func(l *Loop) { l.steering = newMessageQueue(m) } }
-func WithFollowUpMode(m QueueMode) Option           { return func(l *Loop) { l.followUp = newMessageQueue(m) } }
-func WithToolExecution(m ToolExecutionMode) Option   { return func(l *Loop) { l.toolExec = m } }
-func WithCompaction(cfg CompactionConfig) Option     { return func(l *Loop) { l.compaction = &cfg } }
-func WithParams(p any) Option                        { return func(l *Loop) { l.params = p } }
+func WithHooks(h Hooks) Option            { return func(l *Loop) { l.session.hooks = h } }
+func WithSystemPrompt(s string) Option    { return func(l *Loop) { l.session.systemPrompt = s } }
+func WithTools(t []ToolDef) Option        { return func(l *Loop) { l.session.tools = t } }
+func WithMaxTurns(n int) Option           { return func(l *Loop) { l.session.maxTurns = n } }
+func WithParams(p any) Option             { return func(l *Loop) { l.session.params = p } }
+func WithToolExecution(m ToolExecutionMode) Option { return func(l *Loop) { l.toolExec = m } }
+func WithSteeringMode(m QueueMode) Option {
+	return func(l *Loop) { l.session.steering = newMessageQueue(m) }
+}
+func WithFollowUpMode(m QueueMode) Option {
+	return func(l *Loop) { l.session.followUp = newMessageQueue(m) }
+}
+func WithCompaction(cfg CompactionConfig) Option {
+	return func(l *Loop) { l.session.compaction = &cfg }
+}
 
 // New creates a Loop. The streamFn and executor are required — everything
 // else is configured via options.
 func New(streamFn StreamFn, executor ToolExecutor, opts ...Option) *Loop {
 	l := &Loop{
+		session:  NewSession(nil),
 		streamFn: streamFn,
 		executor: executor,
-		maxTurns: 100,
-		steering: newMessageQueue(QueueAll),
-		followUp: newMessageQueue(QueueAll),
 	}
 	for _, opt := range opts {
 		opt(l)
@@ -67,31 +63,24 @@ func New(streamFn StreamFn, executor ToolExecutor, opts ...Option) *Loop {
 	return l
 }
 
+// Session returns the underlying Session for direct access.
+func (l *Loop) Session() *Session {
+	return l.session
+}
+
 // Steer injects a message between turns while the loop is running.
-// Thread-safe — can be called from any goroutine (webhooks, UI events, etc).
+// Thread-safe.
 func (l *Loop) Steer(msg Message) {
-	l.steering.Enqueue(msg)
+	l.session.Steer(msg)
 }
 
-// FollowUp queues a message that is processed only after the loop would
-// otherwise stop. If the loop has pending follow-ups when it reaches a
-// natural stop, it drains them and continues.
+// FollowUp queues a message for after the loop would stop.
 func (l *Loop) FollowUp(msg Message) {
-	l.followUp.Enqueue(msg)
+	l.session.FollowUp(msg)
 }
 
-// Run executes the agent loop starting from the given messages.
-//
-// The loop:
-//  1. Injects any pending steering messages
-//  2. Calls TransformContext + ConvertToLLM + StreamFn
-//  3. Extracts tool calls from the response
-//  4. Runs BeforeToolCall → ToolExecutor → AfterToolCall for each
-//  5. Calls ShouldStop — if false, calls PrepareNextTurn and repeats
-//  6. On natural stop, checks follow-up queue — if non-empty, continues
-//
-// Returns nil on clean completion, context.Canceled on abort, or the
-// first unrecoverable error.
+// Run executes the sync agent loop starting from the given messages.
+// Returns the full conversation history on completion.
 func (l *Loop) Run(ctx context.Context, messages []Message) ([]Message, error) {
 	l.mu.Lock()
 	if l.running {
@@ -106,208 +95,90 @@ func (l *Loop) Run(ctx context.Context, messages []Message) ([]Message, error) {
 		l.mu.Unlock()
 	}()
 
-	l.emit(ctx, Event{Type: EventLoopStart})
+	// Set initial messages on the session
+	l.session.mu.Lock()
+	l.session.messages = messages
+	l.session.turn = 0
+	l.session.mu.Unlock()
 
-	turn := 0
+	l.session.emit(ctx, Event{Type: EventLoopStart})
 
 	for {
-		// Check context before each turn
 		if err := ctx.Err(); err != nil {
-			l.emit(ctx, Event{Type: EventLoopError, TurnNumber: turn, Data: err})
-			return messages, err
+			l.session.emit(ctx, Event{Type: EventLoopError, Data: err})
+			return l.session.Messages(), err
 		}
 
-		// Guard against runaway loops
-		if turn >= l.maxTurns {
-			l.emit(ctx, Event{Type: EventLoopEnd, TurnNumber: turn, Data: "max_turns"})
-			return messages, nil
+		// Build the LLM request (steering, compaction, context transform)
+		req, err := l.session.NextRequest(ctx)
+		if err != nil {
+			return l.session.Messages(), err
 		}
-
-		// Drain steering queue
-		for _, msg := range l.steering.Drain() {
-			messages = append(messages, msg)
-			l.emit(ctx, Event{Type: EventSteerInject, TurnNumber: turn, Data: msg})
-		}
-
-		// Auto-compact if configured
-		if l.compaction != nil {
-			compacted, cr, compactErr := AutoCompact(ctx, messages, *l.compaction)
-			if compactErr != nil {
-				l.emit(ctx, Event{Type: EventLoopError, TurnNumber: turn, Data: compactErr})
-			} else if cr != nil {
-				messages = compacted
-				l.emit(ctx, Event{Type: EventCompaction, TurnNumber: turn, Data: cr})
-			}
-		}
-
-		l.emit(ctx, Event{Type: EventTurnStart, TurnNumber: turn})
-
-		// Transform context
-		llmMessages := messages
-		if l.hooks.TransformContext != nil {
-			var err error
-			llmMessages, err = l.hooks.TransformContext(ctx, messages)
-			if err != nil {
-				l.emit(ctx, Event{Type: EventLoopError, TurnNumber: turn, Data: err})
-				return messages, fmt.Errorf("transform context: %w", err)
-			}
-		}
-
-		// Convert to LLM wire format
-		if l.hooks.ConvertToLLM != nil {
-			var convertErr error
-			llmMessages, convertErr = l.hooks.ConvertToLLM(ctx, llmMessages)
-			if convertErr != nil {
-				l.emit(ctx, Event{Type: EventLoopError, TurnNumber: turn, Data: convertErr})
-				return messages, fmt.Errorf("convert to llm: %w", convertErr)
-			}
-		} else {
-			llmMessages = defaultConvertToLLM(llmMessages)
+		if req == nil {
+			// maxTurns exceeded
+			return l.session.Messages(), nil
 		}
 
 		// Call the LLM
-		resp, err := l.streamFn(ctx, StreamRequest{
-			SystemPrompt: l.systemPrompt,
-			Messages:     llmMessages,
-			Tools:        l.tools,
-			Params:       l.params,
-		})
+		resp, err := l.streamFn(ctx, *req)
 		if err != nil {
-			l.emit(ctx, Event{Type: EventLoopError, TurnNumber: turn, Data: err})
-			return messages, fmt.Errorf("stream: %w", err)
+			l.session.emit(ctx, Event{Type: EventLoopError, Data: err})
+			return l.session.Messages(), fmt.Errorf("stream: %w", err)
 		}
 
-		// Append assistant message to history
-		messages = append(messages, resp.Message)
-		toolCalls := resp.Message.ToolCalls()
+		// Process the response
+		toolCalls := l.session.HandleResponse(ctx, *resp)
 
-		// No tool calls — check stop condition
 		if len(toolCalls) == 0 {
-			l.emit(ctx, Event{Type: EventTurnEnd, TurnNumber: turn, Data: resp.Usage})
-
-			if !l.drainFollowUps(&messages) {
-				l.emit(ctx, Event{Type: EventLoopEnd, TurnNumber: turn})
-				return messages, nil
+			// No tool calls — check if we should continue
+			if !l.session.ShouldContinue(ctx) {
+				l.session.emit(ctx, Event{Type: EventLoopEnd})
+				return l.session.Messages(), nil
 			}
-			turn++
+			l.session.AdvanceTurn(ctx)
 			continue
 		}
 
-		// Execute tool calls
-		results, terminate, err := l.executeTools(ctx, turn, toolCalls, resp.Message, messages)
-		if err != nil {
-			l.emit(ctx, Event{Type: EventLoopError, TurnNumber: turn, Data: err})
-			return messages, fmt.Errorf("tool execution: %w", err)
+		// Execute tools (sync — sequential or parallel)
+		if err := l.executeToolsSync(ctx, toolCalls); err != nil {
+			return l.session.Messages(), err
 		}
 
-		// Append tool result messages to history
-		for i, tc := range toolCalls {
-			if i < len(results) {
-				messages = append(messages, ToolResultMessage(tc.ID, results[i].Content, results[i].IsError))
-			}
+		// Check stop condition
+		if !l.session.ShouldContinue(ctx) {
+			l.session.emit(ctx, Event{Type: EventLoopEnd})
+			return l.session.Messages(), nil
 		}
 
-		// Apply dynamic tool changes from results
-		l.applyToolChanges(results)
-
-		l.emit(ctx, Event{Type: EventTurnEnd, TurnNumber: turn, Data: resp.Usage})
-
-		// Check stop — terminate hint or custom hook
-		if terminate || l.shouldStop(ctx, turn, messages, resp.Message, toolCalls, results) {
-			if !l.drainFollowUps(&messages) {
-				l.emit(ctx, Event{Type: EventLoopEnd, TurnNumber: turn})
-				return messages, nil
-			}
-		}
-
-		// Prepare next turn — let consumer swap tools, prompt, or stream fn
-		if l.hooks.PrepareNextTurn != nil {
-			update, err := l.hooks.PrepareNextTurn(ctx, TurnContext{
-				TurnNumber:    turn,
-				Messages:      messages,
-				LastAssistant: &resp.Message,
-				Tools:         l.tools,
-				SystemPrompt:  l.systemPrompt,
-			})
-			if err != nil {
-				l.emit(ctx, Event{Type: EventLoopError, TurnNumber: turn, Data: err})
-				return messages, fmt.Errorf("prepare next turn: %w", err)
-			}
-			if update != nil {
-				l.applyTurnUpdate(update)
-			}
-		}
-
-		turn++
+		l.session.AdvanceTurn(ctx)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
-func (l *Loop) executeTools(ctx context.Context, turn int, calls []ToolCall, assistant Message, messages []Message) ([]ToolResult, bool, error) {
-	results := make([]ToolResult, len(calls))
-	terminateFlags := make([]bool, len(calls))
-
-	exec := func(i int, tc ToolCall) error {
-		l.emit(ctx, Event{Type: EventToolCall, TurnNumber: turn, Data: tc})
-
+// executeToolsSync runs tool calls synchronously (blocking).
+func (l *Loop) executeToolsSync(ctx context.Context, calls []ToolCall) error {
+	exec := func(tc ToolCall) error {
 		// Before hook
-		if l.hooks.BeforeToolCall != nil {
-			before, err := l.hooks.BeforeToolCall(ctx, BeforeToolCallContext{
-				TurnNumber: turn,
-				Call:       tc,
-				Assistant:  assistant,
-				Messages:   messages,
-			})
-			if err != nil {
-				return fmt.Errorf("before tool call %s: %w", tc.Name, err)
-			}
-			if before != nil && before.Block {
-				reason := before.Reason
-				if reason == "" {
-					reason = "tool call blocked"
-				}
-				results[i] = ToolResult{Content: reason, IsError: true}
-				terminateFlags[i] = before.Terminate
-				l.emit(ctx, Event{Type: EventToolResult, TurnNumber: turn, Data: results[i]})
-				return nil
-			}
-		}
-
-		// Execute
-		result, err := l.executor(ctx, tc)
+		before, err := l.session.BeforeToolCall(ctx, tc)
 		if err != nil {
-			result = ToolResult{Content: err.Error(), IsError: true}
+			return err
 		}
 
-		// After hook
-		if l.hooks.AfterToolCall != nil {
-			after, afterErr := l.hooks.AfterToolCall(ctx, AfterToolCallContext{
-				TurnNumber: turn,
-				Call:       tc,
-				Result:     result,
-				Assistant:  assistant,
-				Messages:   messages,
-			})
-			if afterErr != nil {
-				return fmt.Errorf("after tool call %s: %w", tc.Name, afterErr)
+		var result ToolResult
+		if before != nil && before.Block {
+			reason := before.Reason
+			if reason == "" {
+				reason = "tool call blocked"
 			}
-			if after != nil {
-				if after.Content != nil {
-					result.Content = *after.Content
-				}
-				if after.IsError != nil {
-					result.IsError = *after.IsError
-				}
-				terminateFlags[i] = after.Terminate
+			result = ToolResult{Content: reason, IsError: true}
+		} else {
+			result, err = l.executor(ctx, tc)
+			if err != nil {
+				result = ToolResult{Content: err.Error(), IsError: true}
 			}
 		}
 
-		results[i] = result
-		l.emit(ctx, Event{Type: EventToolResult, TurnNumber: turn, Data: result})
-		return nil
+		_, err = l.session.HandleToolResult(ctx, tc.ID, result)
+		return err
 	}
 
 	if l.toolExec == ToolExecParallel && len(calls) > 1 {
@@ -317,9 +188,9 @@ func (l *Loop) executeTools(ctx context.Context, turn int, calls []ToolCall, ass
 		execCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 
-		for i, tc := range calls {
+		for _, tc := range calls {
 			wg.Add(1)
-			go func(i int, tc ToolCall) {
+			go func(tc ToolCall) {
 				defer wg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
@@ -327,33 +198,25 @@ func (l *Loop) executeTools(ctx context.Context, turn int, calls []ToolCall, ass
 				if execCtx.Err() != nil {
 					return
 				}
-				if err := exec(i, tc); err != nil {
+				if err := exec(tc); err != nil {
 					firstErr.CompareAndSwap(nil, err)
 					cancel()
 				}
-			}(i, tc)
+			}(tc)
 		}
 		wg.Wait()
 		if v := firstErr.Load(); v != nil {
-			return results, false, v.(error)
+			return v.(error)
 		}
 	} else {
-		for i, tc := range calls {
-			if err := exec(i, tc); err != nil {
-				return results, false, err
+		for _, tc := range calls {
+			if err := exec(tc); err != nil {
+				return err
 			}
 		}
 	}
 
-	allTerminate := len(calls) > 0
-	for _, t := range terminateFlags {
-		if !t {
-			allTerminate = false
-			break
-		}
-	}
-
-	return results, allTerminate, nil
+	return nil
 }
 
 func maxParallel(n int) int {
@@ -362,81 +225,6 @@ func maxParallel(n int) int {
 		return n
 	}
 	return cap
-}
-
-func (l *Loop) shouldStop(ctx context.Context, turn int, messages []Message, assistant Message, calls []ToolCall, results []ToolResult) bool {
-	if l.hooks.ShouldStop != nil {
-		return l.hooks.ShouldStop(ctx, StopContext{
-			TurnNumber:    turn,
-			Messages:      messages,
-			LastAssistant: assistant,
-			ToolCalls:     calls,
-			ToolResults:   results,
-		})
-	}
-	// Only called from the tool-calls-present branch; no-tool-call stops
-	// are handled earlier in Run(). Default: keep going after tool results.
-	return false
-}
-
-func (l *Loop) drainFollowUps(messages *[]Message) bool {
-	drained := l.followUp.Drain()
-	if len(drained) == 0 {
-		return false
-	}
-	*messages = append(*messages, drained...)
-	return true
-}
-
-func (l *Loop) applyTurnUpdate(update *TurnUpdate) {
-	if update.Tools != nil {
-		l.tools = update.Tools
-	}
-	if update.SystemPrompt != nil {
-		l.systemPrompt = *update.SystemPrompt
-	}
-	if update.StreamFn != nil {
-		l.streamFn = update.StreamFn
-	}
-	if update.Params != nil {
-		l.params = update.Params
-	}
-}
-
-func (l *Loop) applyToolChanges(results []ToolResult) {
-	for _, r := range results {
-		for _, t := range r.AddTools {
-			l.addTool(t)
-		}
-		for _, name := range r.RemoveTools {
-			l.removeTool(name)
-		}
-	}
-}
-
-func (l *Loop) addTool(t ToolDef) {
-	for i, existing := range l.tools {
-		if existing.Name == t.Name {
-			l.tools[i] = t
-			return
-		}
-	}
-	l.tools = append(l.tools, t)
-}
-
-func (l *Loop) removeTool(name string) {
-	for i, t := range l.tools {
-		if t.Name == name {
-			l.tools = append(l.tools[:i], l.tools[i+1:]...)
-			return
-		}
-	}
-}
-
-func (l *Loop) emit(ctx context.Context, event Event) {
-	if l.hooks.OnEvent != nil {
-		l.hooks.OnEvent(ctx, event)
-	}
 }
 
 func defaultConvertToLLM(messages []Message) []Message {
