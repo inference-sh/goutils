@@ -442,6 +442,10 @@ func (l *Loop) emit(ctx context.Context, event Event) {
 func defaultConvertToLLM(messages []Message) []Message {
 	out := make([]Message, 0, len(messages))
 	for _, m := range messages {
+		// Skip system messages — SystemPrompt is passed separately in StreamRequest.
+		if m.Role == RoleSystem {
+			continue
+		}
 		if m.Role.IsLLMRole() {
 			out = append(out, m)
 		}

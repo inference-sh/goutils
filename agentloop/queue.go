@@ -31,12 +31,6 @@ func (q *messageQueue) Enqueue(msg Message) {
 	q.messages = append(q.messages, msg)
 }
 
-func (q *messageQueue) HasItems() bool {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return len(q.messages) > 0
-}
-
 func (q *messageQueue) Drain() []Message {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -57,8 +51,3 @@ func (q *messageQueue) Drain() []Message {
 	return []Message{first}
 }
 
-func (q *messageQueue) Clear() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	q.messages = nil
-}
