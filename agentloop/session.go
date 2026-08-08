@@ -82,6 +82,14 @@ func (s *Session) Turn() int {
 	return s.turn
 }
 
+// SetMessages replaces the conversation history. Use when reloading
+// state from a persistent store between async event boundaries.
+func (s *Session) SetMessages(msgs []Message) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.messages = msgs
+}
+
 // NextRequest prepares the LLM call for the current turn. It drains
 // steering messages, runs compaction, applies TransformContext and
 // ConvertToLLM hooks, and returns the ready-to-send request.
