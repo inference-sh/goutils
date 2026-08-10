@@ -23,7 +23,7 @@ type Session struct {
 	compaction   *CompactionConfig
 	messages     []Message
 	turn         int
-	steering     *messageQueue
+	pending     *messageQueue
 	followUp     *messageQueue
 
 	// Per-turn state for tracking tool results
@@ -49,7 +49,7 @@ func NewSession(messages []Message, opts ...SessionOption) *Session {
 	s := &Session{
 		maxTurns: 100,
 		messages: messages,
-		steering: newMessageQueue(QueueAll),
+		pending: newMessageQueue(QueueAll),
 		followUp: newMessageQueue(QueueAll),
 	}
 	for _, opt := range opts {
@@ -58,9 +58,10 @@ func NewSession(messages []Message, opts ...SessionOption) *Session {
 	return s
 }
 
-// Steer injects a message between turns. Thread-safe.
-func (s *Session) Steer(msg Message) {
-	s.steering.Enqueue(msg)
+// QueueMessage adds a message to be included in the next turn. Thread-safe.
+// Use from any goroutine — e.g. stdin input arriving while the loop runs.
+func (s *Session) QueueMessage(msg Message) {
+	s.pending.Enqueue(msg)
 }
 
 // FollowUp queues a message for after the session would otherwise stop.
@@ -91,7 +92,7 @@ func (s *Session) SetMessages(msgs []Message) {
 }
 
 // NextRequest prepares the LLM call for the current turn. It drains
-// steering messages, runs compaction, applies TransformContext and
+// pending messages, runs compaction, applies TransformContext and
 // ConvertToLLM hooks, and returns the ready-to-send request.
 //
 // Returns nil if the session has exceeded maxTurns.
@@ -104,10 +105,10 @@ func (s *Session) NextRequest(ctx context.Context) (*StreamRequest, error) {
 		return nil, nil
 	}
 
-	// Drain steering
-	for _, msg := range s.steering.Drain() {
+	// Drain queued messages
+	for _, msg := range s.pending.Drain() {
 		s.messages = append(s.messages, msg)
-		s.emit(ctx, Event{Type: EventSteerInject, TurnNumber: s.turn, Data: msg})
+		s.emit(ctx, Event{Type: EventMessageQueued, TurnNumber: s.turn, Data: msg})
 	}
 
 	// Auto-compact

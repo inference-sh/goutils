@@ -14,7 +14,7 @@ const (
 	QueueOneAtATime
 )
 
-// messageQueue is a thread-safe FIFO queue for steering and follow-up messages.
+// messageQueue is a thread-safe FIFO queue for pending and follow-up messages.
 type messageQueue struct {
 	mu       sync.Mutex
 	messages []Message

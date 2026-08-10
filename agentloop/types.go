@@ -1,5 +1,5 @@
 // Package agentloop provides a provider-agnostic agent loop with pluggable
-// hooks for tool dispatch, context management, compaction, and steering.
+// hooks for tool dispatch, context management, and compaction.
 //
 // The loop operates on [Message] values — a role plus content blocks — and
 // delegates LLM calls and tool execution to caller-supplied functions. This

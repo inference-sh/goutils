@@ -39,8 +39,8 @@ func WithTools(t []ToolDef) Option        { return func(l *Loop) { l.session.too
 func WithMaxTurns(n int) Option           { return func(l *Loop) { l.session.maxTurns = n } }
 func WithParams(p any) Option             { return func(l *Loop) { l.session.params = p } }
 func WithToolExecution(m ToolExecutionMode) Option { return func(l *Loop) { l.toolExec = m } }
-func WithSteeringMode(m QueueMode) Option {
-	return func(l *Loop) { l.session.steering = newMessageQueue(m) }
+func WithQueueMode(m QueueMode) Option {
+	return func(l *Loop) { l.session.pending = newMessageQueue(m) }
 }
 func WithFollowUpMode(m QueueMode) Option {
 	return func(l *Loop) { l.session.followUp = newMessageQueue(m) }
@@ -68,10 +68,9 @@ func (l *Loop) Session() *Session {
 	return l.session
 }
 
-// Steer injects a message between turns while the loop is running.
-// Thread-safe.
-func (l *Loop) Steer(msg Message) {
-	l.session.Steer(msg)
+// QueueMessage adds a message to be included in the next turn. Thread-safe.
+func (l *Loop) QueueMessage(msg Message) {
+	l.session.QueueMessage(msg)
 }
 
 // FollowUp queues a message for after the loop would stop.

@@ -201,14 +201,14 @@ func TestSession_BeforeToolCall_Block(t *testing.T) {
 	}
 }
 
-func TestSession_Steering(t *testing.T) {
+func TestSession_QueueMessage(t *testing.T) {
 	session := NewSession(
 		[]Message{TextMessage(RoleUser, "start")},
 	)
 	ctx := context.Background()
 
-	// Queue steering before NextRequest
-	session.Steer(TextMessage(RoleUser, "also consider X"))
+	// Queue queued before NextRequest
+	session.QueueMessage(TextMessage(RoleUser, "also consider X"))
 
 	req, _ := session.NextRequest(ctx)
 	if req == nil {
@@ -225,7 +225,7 @@ func TestSession_Steering(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("steering message not found in history")
+		t.Error("queued message not found in history")
 	}
 }
 

@@ -125,7 +125,7 @@ const (
 	EventLoopEnd      EventType = "loop.end"
 	EventLoopError    EventType = "loop.error"
 	EventCompaction   EventType = "compaction"
-	EventSteerInject  EventType = "steer.inject"
+	EventMessageQueued EventType = "message.queued"
 )
 
 // Event carries lifecycle data from the loop to observers.

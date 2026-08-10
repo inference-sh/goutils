@@ -342,10 +342,10 @@ func TestHook_OnEvent_Lifecycle(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Steering and follow-up tests
+// Queue and follow-up tests
 // ---------------------------------------------------------------------------
 
-func TestSteering_InjectBetweenTurns(t *testing.T) {
+func TestQueueMessage_InjectBetweenTurns(t *testing.T) {
 	tc := ToolCall{ID: "call-1", Name: "work", Arguments: nil}
 	callCount := 0
 
@@ -364,15 +364,13 @@ func TestSteering_InjectBetweenTurns(t *testing.T) {
 
 	loop := New(stream, echoExecutor)
 
-	// Queue a steering message before run — it'll be picked up on the first turn
-	loop.Steer(TextMessage(RoleUser, "also consider X"))
+	loop.QueueMessage(TextMessage(RoleUser, "also consider X"))
 
 	msgs, err := loop.Run(context.Background(), []Message{TextMessage(RoleUser, "start")})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// The steering message should appear in the history
 	found := false
 	for _, m := range msgs {
 		if m.Text() == "also consider X" {
@@ -381,7 +379,7 @@ func TestSteering_InjectBetweenTurns(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("steering message not found in history")
+		t.Error("queued message not found in history")
 	}
 }
 
