@@ -16,21 +16,23 @@ type ArchiveFunc func(path string) error
 // LogArchiver watches a log directory for new rotated .gz files
 // and uploads them via the provided archive function.
 type LogArchiver struct {
-	dir     string
-	fn      ArchiveFunc
-	known   map[string]struct{}
-	mu      sync.Mutex
-	cancel  context.CancelFunc
-	started bool
+	dir      string
+	fn       ArchiveFunc
+	known    map[string]struct{}
+	failures map[string]int
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	started  bool
 }
 
 // NewLogArchiver creates an archiver for the given log directory.
 // Call Start() to begin watching.
 func NewLogArchiver(logDir string, fn ArchiveFunc) *LogArchiver {
 	a := &LogArchiver{
-		dir:   logDir,
-		fn:    fn,
-		known: make(map[string]struct{}),
+		dir:      logDir,
+		fn:       fn,
+		known:    make(map[string]struct{}),
+		failures: make(map[string]int),
 	}
 
 	// snapshot existing files so we don't re-upload old ones on startup
@@ -108,7 +110,18 @@ func (a *LogArchiver) scan() {
 
 		path := filepath.Join(a.dir, e.Name())
 		if err := a.fn(path); err != nil {
-			Error("archive").Err(err).Str("file", e.Name()).Msg("failed to archive rotated log")
+			a.mu.Lock()
+			a.failures[e.Name()]++
+			count := a.failures[e.Name()]
+			if count >= 3 {
+				a.known[e.Name()] = struct{}{}
+				delete(a.failures, e.Name())
+				a.mu.Unlock()
+				Error("archive").Err(err).Str("file", e.Name()).Msg("giving up after 3 failures")
+			} else {
+				a.mu.Unlock()
+				Error("archive").Err(err).Str("file", e.Name()).Int("attempt", count).Msg("failed to archive rotated log")
+			}
 			continue
 		}
 
@@ -116,6 +129,7 @@ func (a *LogArchiver) scan() {
 
 		a.mu.Lock()
 		a.known[e.Name()] = struct{}{}
+		delete(a.failures, e.Name())
 		a.mu.Unlock()
 	}
 
@@ -124,6 +138,11 @@ func (a *LogArchiver) scan() {
 	for name := range a.known {
 		if _, exists := current[name]; !exists {
 			delete(a.known, name)
+		}
+	}
+	for name := range a.failures {
+		if _, exists := current[name]; !exists {
+			delete(a.failures, name)
 		}
 	}
 	a.mu.Unlock()
