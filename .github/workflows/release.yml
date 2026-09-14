@@ -19,21 +19,9 @@ jobs:
         run: |
           curl -sf "https://proxy.golang.org/github.com/inference-sh/goutils/@v/${GITHUB_REF_NAME}.info" > /dev/null
 
-      - name: Update downstream consumers
-        env:
-          GH_TOKEN: ${{ secrets.REPO_PAT }}
-        run: |
-          dispatch() {
-            local repo=$1
-            echo "Dispatching to $repo..."
-            curl -sf -X POST \
-              -H "Authorization: token $GH_TOKEN" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/$repo/actions/workflows/update-dep.yml/dispatches" \
-              -d "{\"ref\":\"dev\",\"inputs\":{\"module\":\"github.com/inference-sh/goutils\",\"version\":\"${GITHUB_REF_NAME}\"}}" || true
-          }
-
-          dispatch inference-sh/api
-          dispatch inference-sh/cli
-          dispatch inference-sh/engine
-          dispatch inference-sh/uploader
+      # Consumers are bumped by `make release` in this repo, which points
+      # each checked-out consumer at the new tag and prints what to commit.
+      # CI used to dispatch update-dep.yml, which committed and pushed go.mod
+      # straight to their dev branches as the bot. Those repos are one shared
+      # checkout, so that arrived mid-edit as a surprise commit to rebase past.
+      # This workflow publishes the module. It does not author in other repos.
