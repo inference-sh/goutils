@@ -22,11 +22,6 @@ func Slugify(input string) string {
 	return slug.Make(input)
 }
 
-func IsValidName(name string, regex string) bool {
-	match, err := regexp.MatchString(regex, name)
-	return match && err == nil
-}
-
 func IsValidEmail(email string) bool {
 	return regexp.MustCompile(`^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`).MatchString(email)
 }
