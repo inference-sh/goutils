@@ -1,0 +1,31 @@
+# Consumers check their own dependencies. A module's release does not reach
+# into the repos that use it: goutils and models publish a tag, and each
+# consumer picks it up here, as a pull request against its own branch.
+#
+# Daily rather than weekly because an internal tag is usually cut because
+# something here needs it. Grouping keeps that from meaning a dozen PRs a
+# day: internal modules arrive in their own PR, routine third-party bumps
+# are batched into one, and majors still come through alone so they get
+# read properly.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - security
+    groups:
+      inference-sh:
+        patterns:
+          - "github.com/inference-sh/*"
+      go-deps:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "github.com/inference-sh/*"
+        update-types:
+          - minor
+          - patch
