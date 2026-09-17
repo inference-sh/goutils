@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -326,5 +327,60 @@ func TestDownloadAndInstallBinary_ReplacesExisting(t *testing.T) {
 	}
 	if !bytes.Equal(got, binaryPayload) {
 		t.Fatalf("new payload mismatch")
+	}
+}
+
+func TestSwapIntoPlace_ConcurrentNeverLosesBinary(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "belt")
+	if err := os.WriteFile(dest, []byte("old"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f, err := os.CreateTemp(dir, ".belt.new-*")
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			f.WriteString("new")
+			f.Close()
+			if err := swapIntoPlace(f.Name(), dest, false); err != nil {
+				t.Errorf("swap: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("binary missing after concurrent swaps: %v", err)
+	}
+	if string(got) != "new" {
+		t.Fatalf("got %q", got)
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, ".belt.new-*"))
+	if len(left) != 0 {
+		t.Fatalf("staging files left behind: %v", left)
+	}
+}
+
+func TestSwapIntoPlace_WindowsMovesOldAside(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "belt.exe")
+	os.WriteFile(dest, []byte("old"), 0o755)
+	staging := filepath.Join(dir, ".belt.exe.new-1")
+	os.WriteFile(staging, []byte("new"), 0o755)
+
+	if err := swapIntoPlace(staging, dest, true); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dest)
+	if string(got) != "new" {
+		t.Fatalf("got %q", got)
 	}
 }

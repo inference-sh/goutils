@@ -12,9 +12,8 @@ import (
 // to finish, and exits with its exit code so the overall user experience is
 // close to the Unix flow.
 //
-// Note: installOverSelf for Windows relies on the .old.exe rename dance
-// handled inside common-go/pkg/utils.DownloadAndInstallBinary when Windows
-// is true. See that function for details.
+// Note: installOverSelf for Windows relies on binfetch.swapIntoPlace moving
+// the running exe aside to "<exe>.old" before the new one is renamed in.
 func reexec(path string, args []string) error {
 	cmd := exec.Command(path, args[1:]...)
 	cmd.Stdin = os.Stdin

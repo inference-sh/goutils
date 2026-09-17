@@ -53,9 +53,13 @@ func IsNewerVersion(available, current string) bool {
 	return semver.Compare(available, current) > 0
 }
 
+// manifestClient bounds the manifest fetch: it runs before every command, so a
+// hung connection must not hang the CLI.
+var manifestClient = &http.Client{Timeout: 10 * time.Second}
+
 // CheckVersion checks if there's a new version available compared to the provided version
 func CheckVersion(manifestUrl string, platform string, arch string, currentVersion string) (*UpdateInfo, error) {
-	resp, err := http.Get(manifestUrl)
+	resp, err := manifestClient.Get(manifestUrl)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest: %w", err)
 	}

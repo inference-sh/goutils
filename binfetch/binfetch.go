@@ -9,10 +9,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/inference-sh/goutils/progress"
 )
@@ -42,6 +44,18 @@ type BinFetchOptions struct {
 	Aliases []string
 }
 
+// defaultHTTPClient bounds connection setup so a dead network fails fast, but
+// leaves the body read unbounded: archives are large and links can be slow.
+// Callers cancel long downloads through ctx.
+var defaultHTTPClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	},
+}
+
 // DownloadAndInstallBinary downloads an archive, verifies its SHA256, extracts
 // the first regular file into a staging path next to DestPath, then atomically
 // swaps it into place. Callers should already know which archive format the URL
@@ -51,7 +65,7 @@ type BinFetchOptions struct {
 // enginebin resolver. Keep it dependency-free so both can import it.
 func DownloadAndInstallBinary(ctx context.Context, opts BinFetchOptions) error {
 	if opts.HTTPClient == nil {
-		opts.HTTPClient = http.DefaultClient
+		opts.HTTPClient = defaultHTTPClient
 	}
 
 	tmpFile, err := downloadArchive(ctx, opts.URL, opts.ExpectedSHA256, opts.HTTPClient, opts.OnProgress)
@@ -65,18 +79,22 @@ func DownloadAndInstallBinary(ctx context.Context, opts BinFetchOptions) error {
 		return fmt.Errorf("create dest dir: %w", err)
 	}
 
-	stagingPath := opts.DestPath + ".new"
+	// Stage under a unique name: a fixed "<dest>.new" lets two concurrent
+	// updaters clobber each other's staging file mid-swap.
+	staging, err := os.CreateTemp(filepath.Dir(opts.DestPath), "."+filepath.Base(opts.DestPath)+".new-*")
+	if err != nil {
+		return fmt.Errorf("create staging file: %w", err)
+	}
+	stagingPath := staging.Name()
+	staging.Close()
+	defer os.Remove(stagingPath) // no-op once the rename succeeds
+
 	if err := extractSingleBinary(tmpFile, opts.URL, stagingPath, opts.Windows); err != nil {
 		return err
 	}
 
-	if _, err := os.Stat(opts.DestPath); err == nil {
-		if err := os.Remove(opts.DestPath); err != nil {
-			return fmt.Errorf("remove old binary: %w", err)
-		}
-	}
-	if err := os.Rename(stagingPath, opts.DestPath); err != nil {
-		return fmt.Errorf("install new binary: %w", err)
+	if err := swapIntoPlace(stagingPath, opts.DestPath, opts.Windows); err != nil {
+		return err
 	}
 	if !opts.Windows {
 		if err := os.Chmod(opts.DestPath, 0o755); err != nil {
@@ -89,6 +107,38 @@ func DownloadAndInstallBinary(ctx context.Context, opts BinFetchOptions) error {
 			return fmt.Errorf("install aliases: %w", err)
 		}
 	}
+	return nil
+}
+
+// swapIntoPlace moves stagingPath over destPath without ever leaving destPath
+// missing. On Unix a rename over the target is atomic, and works while the
+// target is executing. Windows refuses to overwrite or delete a running exe
+// but does allow renaming it, so the old binary is moved aside first and
+// restored if the swap fails.
+func swapIntoPlace(stagingPath, destPath string, windows bool) error {
+	if !windows {
+		if err := os.Rename(stagingPath, destPath); err != nil {
+			return fmt.Errorf("install new binary: %w", err)
+		}
+		return nil
+	}
+
+	oldPath := destPath + ".old"
+	_ = os.Remove(oldPath) // left by a previous update; fails harmlessly if still running
+	if _, err := os.Stat(destPath); err == nil {
+		if _, err := os.Stat(oldPath); err == nil {
+			// A previous .old is still locked by a running process.
+			oldPath = fmt.Sprintf("%s.old-%d", destPath, os.Getpid())
+		}
+		if err := os.Rename(destPath, oldPath); err != nil {
+			return fmt.Errorf("move old binary aside: %w", err)
+		}
+	}
+	if err := os.Rename(stagingPath, destPath); err != nil {
+		_ = os.Rename(oldPath, destPath)
+		return fmt.Errorf("install new binary: %w", err)
+	}
+	_ = os.Remove(oldPath) // fails while the old exe is running; cleaned up next update
 	return nil
 }
 

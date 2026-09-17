@@ -215,3 +215,35 @@ func TestWriteStateCreatesDir(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 }
+
+func TestFailedInstallBacksOff(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := Config{
+		ManifestURL:    "https://example.invalid/manifest.json",
+		CurrentVersion: "v1.0.0",
+		CheckInterval:  1 * time.Hour,
+		StateDir:       tmp,
+		selfPath:       func() (string, error) { return filepath.Join(tmp, "belt"), nil },
+		execFn:         func(string, []string) error { t.Fatal("must not re-exec"); return nil },
+	}
+	applyDefaults(&cfg)
+
+	// A cached newer version whose install just failed.
+	if err := writeState(stateFile(cfg), &state{
+		LastCheck:     time.Now().Add(-time.Minute),
+		LastVersion:   "v1.1.0",
+		DownloadURL:   "https://example.invalid/belt.tar.gz",
+		FailedVersion: "v1.1.0",
+		FailedAt:      time.Now().Add(-10 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := CheckAndReexec(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("backoff should not error: %v", err)
+	}
+	if !res.Skipped || !res.UpdateAvailable {
+		t.Fatalf("expected a skipped pending update, got %+v", res)
+	}
+}

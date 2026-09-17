@@ -106,7 +106,16 @@ type state struct {
 	DownloadURL string    `json:"downloadURL,omitempty"`
 	SHA256      string    `json:"sha256,omitempty"`
 	Aliases     []string  `json:"aliases,omitempty"`
+	// FailedVersion / FailedAt record the last install attempt that failed,
+	// so a broken update (locked exe, full disk) is retried on a backoff
+	// instead of re-downloading on every command.
+	FailedVersion string    `json:"failedVersion,omitempty"`
+	FailedAt      time.Time `json:"failedAt,omitempty"`
 }
+
+// installRetryBackoff is how long a failed install of a given version is left
+// alone before it is attempted again.
+const installRetryBackoff = time.Hour
 
 // CheckAndReexec implements the full self-update flow. See package doc.
 func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
@@ -149,13 +158,17 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 			return nil, fmt.Errorf("check manifest: %w", err)
 		}
 
-		_ = writeState(stateFile(cfg), &state{
+		next := &state{
 			LastCheck:   cfg.nowFn(),
 			LastVersion: info.AvailableVersion,
 			DownloadURL: info.DownloadURL,
 			SHA256:      info.SHA256,
 			Aliases:     info.Aliases,
-		})
+		}
+		if prev, _ := readState(stateFile(cfg)); prev != nil {
+			next.FailedVersion, next.FailedAt = prev.FailedVersion, prev.FailedAt
+		}
+		_ = writeState(stateFile(cfg), next)
 
 		if !info.UpdateAvailable {
 			return &Result{
@@ -183,14 +196,28 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 		}, nil
 	}
 
+	if st, _ := readState(stateFile(cfg)); st != nil && !cfg.Force &&
+		st.FailedVersion == info.AvailableVersion && cfg.nowFn().Sub(st.FailedAt) < installRetryBackoff {
+		return &Result{
+			Skipped:         true,
+			SkipReason:      "previous install attempt failed recently",
+			UpdateAvailable: true,
+			FromVersion:     cfg.CurrentVersion,
+			ToVersion:       info.AvailableVersion,
+		}, nil
+	}
+
 	cfg.Logf("updating %s -> %s...", cfg.CurrentVersion, info.AvailableVersion)
 
 	// Check the destination directory is writable.
 	if err := checkWritable(selfPath); err != nil {
+		recordInstallFailure(cfg, info.AvailableVersion)
 		return nil, err
 	}
 
 	if err := installOverSelf(ctx, selfPath, info, cfg); err != nil {
+		recordInstallFailure(cfg, info.AvailableVersion)
+		cfg.Logf("update to %s failed, continuing with %s: %v", info.AvailableVersion, cfg.CurrentVersion, err)
 		return nil, fmt.Errorf("install update: %w", err)
 	}
 
@@ -207,6 +234,18 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 		return res, fmt.Errorf("re-exec: %w", err)
 	}
 	return res, nil
+}
+
+// recordInstallFailure stamps the state file so the next commands skip this
+// version until installRetryBackoff has passed.
+func recordInstallFailure(cfg Config, version string) {
+	st, _ := readState(stateFile(cfg))
+	if st == nil {
+		st = &state{}
+	}
+	st.FailedVersion = version
+	st.FailedAt = cfg.nowFn()
+	_ = writeState(stateFile(cfg), st)
 }
 
 // installOverSelf downloads the new archive and replaces the running binary.
