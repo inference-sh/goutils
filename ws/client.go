@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/inference-sh/recws"
@@ -61,22 +62,46 @@ func NewClientConnection(url string, header http.Header) (*ClientConnection, err
 	return NewClientConnectionWithOptions(url, options)
 }
 
+// slogWrapper adapts recws's slog-style logger (message plus key/value
+// pairs) to the logging package. The pairs are rendered as key=value; they
+// are not printf arguments, and passing them as such printed
+// "%!(EXTRA ...)" garbage in place of the one thing an operator needed to
+// see, such as the status a refused handshake came back with.
 type slogWrapper struct{}
 
 func (l *slogWrapper) Debug(msg string, args ...any) {
-	logging.Debug("ws").Msgf(msg, args...)
+	logging.Debug("ws").Msgf("%s", slogLine(msg, args))
 }
 
 func (l *slogWrapper) Info(msg string, args ...any) {
-	logging.Info("ws").Msgf(msg, args...)
+	logging.Info("ws").Msgf("%s", slogLine(msg, args))
 }
 
 func (l *slogWrapper) Warn(msg string, args ...any) {
-	logging.Warn("ws").Msgf(msg, args...)
+	logging.Warn("ws").Msgf("%s", slogLine(msg, args))
 }
 
 func (l *slogWrapper) Error(msg string, args ...any) {
-	logging.Error("ws").Msgf(msg, args...)
+	logging.Error("ws").Msgf("%s", slogLine(msg, args))
+}
+
+// slogLine renders msg followed by args as key=value pairs, the way slog
+// would; an odd trailing argument is kept rather than dropped.
+func slogLine(msg string, args []any) string {
+	if len(args) == 0 {
+		return msg
+	}
+	var b strings.Builder
+	b.WriteString(msg)
+	for i := 0; i < len(args); i += 2 {
+		b.WriteByte(' ')
+		if i+1 < len(args) {
+			fmt.Fprintf(&b, "%v=%v", args[i], args[i+1])
+		} else {
+			fmt.Fprintf(&b, "%v", args[i])
+		}
+	}
+	return b.String()
 }
 
 // NewClientConnectionWithOptions creates a new WebSocket client connection with custom options
@@ -106,6 +131,30 @@ func NewClientConnectionWithOptions(url string, options ClientOptions) (*ClientC
 	recConn.Dial(url, options.Headers)
 	logging.Info("ws").Msgf( "WebSocket client dialed")
 	return c, nil
+}
+
+// IsConnected reports whether the socket is currently established. The dial
+// runs in the background and reconnects on its own, so callers that must
+// know — a daemon telling its operator "connected" — poll this rather than
+// trusting that NewClientConnection returned.
+func (c *ClientConnection) IsConnected() bool {
+	return c.conn.IsConnected()
+}
+
+// LastDialError returns the most recent dial failure, or nil once connected.
+func (c *ClientConnection) LastDialError() error {
+	return c.conn.GetDialError()
+}
+
+// LastHandshakeStatus returns the HTTP status the server answered the most
+// recent handshake with, or 0 when there was no answer (connection refused,
+// timeout) or the dial has not happened yet.
+func (c *ClientConnection) LastHandshakeStatus() int {
+	resp := c.conn.GetHTTPResponse()
+	if resp == nil {
+		return 0
+	}
+	return resp.StatusCode
 }
 
 // Handle registers a handler for a specific message type
