@@ -61,7 +61,16 @@ type Resolver struct {
 	// version (`<binary> version --short`) within a single Resolver lifetime
 	// so we don't fork a subprocess on every Ensure call.
 	versionCache string
+
+	// updateErr is why the last Ensure kept the cached binary instead of
+	// installing the newer one.
+	updateErr error
 }
+
+// UpdateError reports why the last Ensure returned the cached binary although
+// a newer one was available, or nil. Callers that want to tell the user do so
+// with this; it never fails the command.
+func (r *Resolver) UpdateError() error { return r.updateErr }
 
 // New returns a Resolver with sane defaults applied to cfg. ManifestURL,
 // BinaryName, and CacheDir are required.
@@ -122,8 +131,17 @@ func (r *Resolver) Ensure(ctx context.Context) (string, error) {
 		OnProgress:     r.cfg.OnProgress,
 	})
 	if err != nil {
+		// A failed update must not take a working binary away. This happens
+		// while a release is being published (the manifest names a version
+		// whose archive is not downloadable yet) or when the download is cut
+		// short; the cached binary is older, not broken.
+		if r.cacheExists() {
+			r.updateErr = fmt.Errorf("update %s to %s: %w", r.cfg.BinaryName, info.AvailableVersion, err)
+			return r.binaryPath, nil
+		}
 		return "", fmt.Errorf("install %s: %w", r.cfg.BinaryName, err)
 	}
+	r.updateErr = nil
 	// Reset memoised version so the next call sees the freshly installed binary.
 	r.versionCache = ""
 	return r.binaryPath, nil

@@ -231,3 +231,55 @@ func makeTarGz(t *testing.T, name string, payload []byte) []byte {
 	}
 	return buf.Bytes()
 }
+
+// While a release is being published the manifest can name a version whose
+// archive is not downloadable yet. A working cached binary must survive that:
+// the command runs on the older engine instead of failing.
+func TestEnsureKeepsTheCachedBinaryWhenTheUpdateFails(t *testing.T) {
+	var manifestURL string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/engine/manifest.json", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"version":     "v9.9.9",
+			"releaseDate": time.Now().Format(time.RFC3339),
+			"builds": map[string]any{
+				fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH): map[string]any{
+					"url":        manifestURL + "/engine/not-uploaded-yet.tar.gz", // 404
+					"binaryName": "not-uploaded-yet.tar.gz",
+					"sha256":     "00",
+				},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	manifestURL = srv.URL
+
+	tmp := t.TempDir()
+	r, err := New(Config{ManifestURL: srv.URL + "/engine/manifest.json", BinaryName: "engine", CacheDir: tmp})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Nothing cached: the failure is the caller's to see.
+	if _, err := r.Ensure(context.Background()); err == nil {
+		t.Fatal("Ensure succeeded with nothing cached and nothing downloadable")
+	}
+
+	if err := os.MkdirAll(filepath.Dir(r.BinaryPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(r.BinaryPath(), []byte("the engine from the last release"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path, err := r.Ensure(context.Background())
+	if err != nil || path != r.BinaryPath() {
+		t.Fatalf("Ensure = (%q, %v), want the cached binary", path, err)
+	}
+	if r.UpdateError() == nil {
+		t.Error("UpdateError is nil: the caller cannot tell the user the update failed")
+	}
+	if got, _ := os.ReadFile(path); string(got) != "the engine from the last release" {
+		t.Errorf("cached binary was damaged: %q", got)
+	}
+}
