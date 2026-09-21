@@ -14,7 +14,7 @@ const relayURL = "wss://relay.example.com"
 var testKeys = Keys{[]byte(strings.Repeat("a", 32))}
 
 func TestIssueVerify_RoundTrip(t *testing.T) {
-	want := Grant{Task: "task_1", Role: RoleWorker, Relay: relayURL}
+	want := Grant{Socket: "socket_1", Role: RoleWorker, Relay: relayURL}
 	raw, err := Issue(testKeys, want, time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestIssueVerify_RoundTrip(t *testing.T) {
 }
 
 func TestVerify_Refuses(t *testing.T) {
-	grant := Grant{Task: "task_1", Role: RoleClient, Relay: relayURL}
+	grant := Grant{Socket: "socket_1", Role: RoleClient, Relay: relayURL}
 	issue := func(keys Keys, g Grant, ttl time.Duration) string {
 		t.Helper()
 		raw, err := Issue(keys, g, ttl)
@@ -41,7 +41,7 @@ func TestVerify_Refuses(t *testing.T) {
 	otherKeys := Keys{[]byte(strings.Repeat("b", 32))}
 	unsigned, err := jwt.NewWithClaims(jwt.SigningMethodNone, claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   grant.Task,
+			Subject:   grant.Socket,
 			Audience:  jwt.ClaimStrings{relayURL},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute)),
 		},
@@ -53,7 +53,7 @@ func TestVerify_Refuses(t *testing.T) {
 
 	cases := map[string]string{
 		"expired":       issue(testKeys, grant, -time.Minute),
-		"another relay": issue(testKeys, Grant{Task: "task_1", Role: RoleClient, Relay: "wss://other.example.com"}, time.Minute),
+		"another relay": issue(testKeys, Grant{Socket: "socket_1", Role: RoleClient, Relay: "wss://other.example.com"}, time.Minute),
 		"another key":   issue(otherKeys, grant, time.Minute),
 		"unsigned":      unsigned,
 		"garbage":       "not-a-token",
@@ -68,7 +68,7 @@ func TestVerify_Refuses(t *testing.T) {
 
 func TestVerify_AcceptsRotatedKey(t *testing.T) {
 	old := Keys{[]byte(strings.Repeat("o", 32))}
-	raw, err := Issue(old, Grant{Task: "task_1", Role: RoleClient, Relay: relayURL}, time.Minute)
+	raw, err := Issue(old, Grant{Socket: "socket_1", Role: RoleClient, Relay: relayURL}, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,9 +81,9 @@ func TestVerify_AcceptsRotatedKey(t *testing.T) {
 func TestIssue_RefusesIncompleteGrant(t *testing.T) {
 	for _, g := range []Grant{
 		{Role: RoleClient, Relay: relayURL},
-		{Task: "task_1", Relay: relayURL},
-		{Task: "task_1", Role: "admin", Relay: relayURL},
-		{Task: "task_1", Role: RoleClient},
+		{Socket: "socket_1", Relay: relayURL},
+		{Socket: "socket_1", Role: "admin", Relay: relayURL},
+		{Socket: "socket_1", Role: RoleClient},
 	} {
 		if _, err := Issue(testKeys, g, time.Minute); err == nil {
 			t.Errorf("issued a token for %+v", g)
@@ -106,7 +106,7 @@ func TestParseKeys(t *testing.T) {
 }
 
 func TestSocketURL(t *testing.T) {
-	if got := SocketURL("wss://relay.example.com/", "task_1"); got != "wss://relay.example.com/sockets/task_1" {
+	if got := SocketURL("wss://relay.example.com/", "socket_1"); got != "wss://relay.example.com/sockets/socket_1" {
 		t.Fatal(got)
 	}
 }

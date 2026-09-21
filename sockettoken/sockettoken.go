@@ -1,8 +1,10 @@
-// Package sockettoken is the credential a socket's two ends present to the relay.
+// Package sockettoken is what the API and a socket relay agree on: the
+// credential each end of a socket presents to the relay, and the report the
+// relay sends back about what happened to the socket.
 //
-// The API issues one token per end when it creates a stream task; the relay
-// verifies them and pairs the ends. Issuer and verifier are separate services,
-// so the format lives here, where both can import its one definition.
+// The API issues one token per end when it opens a socket; the relay verifies
+// them and pairs the ends. Issuer and verifier are separate services, so the
+// formats live here, where both can import their one definition.
 //
 // A token is an HS256 JWT signed with a secret only the API and the relays
 // hold. That secret signs nothing else: a relay that leaks it can forge socket
@@ -31,12 +33,12 @@ const (
 
 func (r Role) valid() bool { return r == RoleClient || r == RoleWorker }
 
-// Grant is what a token states: the bearer may join this task's socket, as
-// this end, at this relay.
+// Grant is what a token states: the bearer may join this socket, as this end,
+// at this relay.
 type Grant struct {
-	Task  string
-	Role  Role
-	Relay string // the relay's public base URL, e.g. wss://relay.inference.sh
+	Socket string
+	Role   Role
+	Relay  string // the relay's public base URL, e.g. wss://relay.inference.sh
 }
 
 // ErrInvalid wraps every verification failure.
@@ -68,12 +70,21 @@ func ParseKeys(s string) (Keys, error) {
 	return keys, nil
 }
 
-// SocketURL is the address both ends dial for a task at a relay.
-func SocketURL(relay, task string) string {
-	return strings.TrimRight(relay, "/") + "/sockets/" + task
+// verification offers every key still in rotation to the JWT parser.
+func (keys Keys) verification(*jwt.Token) (any, error) {
+	set := jwt.VerificationKeySet{Keys: make([]jwt.VerificationKey, 0, len(keys))}
+	for _, k := range keys {
+		set.Keys = append(set.Keys, k)
+	}
+	return set, nil
 }
 
-// claims is the wire form. The task is the subject; the relay is the audience.
+// SocketURL is the address both ends dial for a socket at a relay.
+func SocketURL(relay, socket string) string {
+	return strings.TrimRight(relay, "/") + "/sockets/" + socket
+}
+
+// claims is the wire form. The socket is the subject; the relay is the audience.
 type claims struct {
 	jwt.RegisteredClaims
 	Role Role `json:"role"`
@@ -84,13 +95,13 @@ func Issue(keys Keys, g Grant, ttl time.Duration) (string, error) {
 	if len(keys) == 0 {
 		return "", errors.New("no socket signing key configured")
 	}
-	if g.Task == "" || g.Relay == "" || !g.Role.valid() {
+	if g.Socket == "" || g.Relay == "" || !g.Role.valid() {
 		return "", fmt.Errorf("incomplete socket grant: %+v", g)
 	}
 	now := time.Now()
 	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   g.Task,
+			Subject:   g.Socket,
 			Audience:  jwt.ClaimStrings{g.Relay},
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
@@ -112,18 +123,11 @@ func Verify(keys Keys, relay, raw string) (Grant, error) {
 		jwt.WithLeeway(leeway),
 	)
 	var c claims
-	_, err := parser.ParseWithClaims(raw, &c, func(*jwt.Token) (any, error) {
-		set := jwt.VerificationKeySet{Keys: make([]jwt.VerificationKey, 0, len(keys))}
-		for _, k := range keys {
-			set.Keys = append(set.Keys, k)
-		}
-		return set, nil
-	})
-	if err != nil {
+	if _, err := parser.ParseWithClaims(raw, &c, keys.verification); err != nil {
 		return Grant{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	if c.Subject == "" || !c.Role.valid() {
 		return Grant{}, fmt.Errorf("%w: incomplete grant", ErrInvalid)
 	}
-	return Grant{Task: c.Subject, Role: c.Role, Relay: relay}, nil
+	return Grant{Socket: c.Subject, Role: c.Role, Relay: relay}, nil
 }
