@@ -41,12 +41,6 @@ type Grant struct {
 	Relay  string // the relay's public base URL, e.g. wss://relay.inference.sh
 }
 
-// WaitingFrames is how many frames a relay holds for an end whose peer has
-// not arrived yet; past it the relay stops reading that end. An end that
-// redials after a relay restart may send again at most this many frames
-// without blocking, so a worker remembers no more than this.
-const WaitingFrames = 64
-
 // ErrInvalid wraps every verification failure.
 var ErrInvalid = errors.New("invalid socket token")
 
