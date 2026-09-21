@@ -48,6 +48,12 @@ type Report struct {
 	WorkerBytes  int64   `json:"worker_bytes,omitempty"`
 }
 
+// ReportHeader carries the report token on a report request. It is not
+// Authorization on purpose: the API reads any Authorization header as a
+// user's credential and rejects one it does not recognise before the report
+// handler runs.
+const ReportHeader = "X-Socket-Report-Token"
+
 // reportAudience is fixed: a report token is good for reporting and nothing
 // else, and a socket token's audience is a relay URL, so neither passes as
 // the other.
