@@ -259,8 +259,14 @@ func (c *ClientConnection) Close() error {
 	default:
 		close(c.done)
 		// Send a proper close frame so the server sees a clean disconnect
-		// instead of a 1006 abnormal closure.
-		c.conn.Shutdown(5 * time.Second)
+		// instead of a 1006 abnormal closure. Only when connected: recws writes
+		// the frame on its embedded *websocket.Conn, which is nil when the dial
+		// never succeeded (e.g. a daemon stuck on a refused handshake).
+		if c.conn.IsConnected() {
+			c.conn.Shutdown(5 * time.Second)
+		} else {
+			c.conn.Close()
+		}
 		return nil
 	}
 }
