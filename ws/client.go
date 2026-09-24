@@ -234,6 +234,11 @@ func (c *ClientConnection) Listen(ctx context.Context) {
 				logging.Error("ws").Msgf( "Error reading message: %v", err)
 				continue // Let recws handle reconnection
 			}
+			// recws answers a normal close with a nil error and nothing read;
+			// that is the end of the connection, not a message to route.
+			if msg.Type == "" {
+				continue
+			}
 
 			if !c.enqueue(ctx, c.done, msg) {
 				return
