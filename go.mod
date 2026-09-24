@@ -4,6 +4,7 @@ go 1.26.7
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/anandvarma/namegen v1.1.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
@@ -21,7 +22,6 @@ require (
 )
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/gosimple/unidecode v1.0.1 // indirect

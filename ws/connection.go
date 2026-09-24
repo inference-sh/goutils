@@ -6,22 +6,44 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/inference-sh/goutils/pubsub"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
 	// Key prefixes for Redis
 	connectionPrefix = "ws:connection:"
-	// TTL for connection registrations
-	connectionTTL = 5 * time.Minute
+	// connectionTTL is a connection lease's lifetime. The holding instance
+	// renews it every connectionRefreshEvery, so a lease outlives its holder
+	// by at most this long: an instance that crashed without closing its
+	// sockets has its connections read as gone within connectionTTL.
+	connectionTTL = 45 * time.Second
+	// connectionRefreshEvery is how often a holder renews its leases; a
+	// third of the TTL, so two renewals can be missed before one lapses.
+	connectionRefreshEvery = 15 * time.Second
 )
 
+// ConnectionStore is the cross-instance registry of which instance holds each
+// connection. Each entry is a lease owned by one instance: whoever connected
+// last owns it, and only the owner may renew or release it, so an instance
+// that lost a connection to another cannot erase the new holder's entry.
 type ConnectionStore interface {
+	// Register takes the lease for id on behalf of instanceID. A newer
+	// connection always wins, replacing any previous holder.
 	Register(id, instanceID string) error
-	Unregister(id string) error
-	Refresh(id string) error
+	// Unregister releases the lease only if instanceID still holds it, and
+	// reports whether it did. False means the connection moved to another
+	// instance (or the lease had lapsed): the caller no longer speaks for it.
+	Unregister(id, instanceID string) (bool, error)
+	// Refresh renews the lease if instanceID holds it, reclaims it if it lapsed
+	// while the connection is still open here, and reports false only when
+	// another instance holds it.
+	Refresh(id, instanceID string) (bool, error)
+	// Find returns the instance holding id, or nil when no one does.
 	Find(id string) (*string, error)
+	// Live returns, for the ids that have a holder, which instance holds each,
+	// in one round trip. Absent ids are not connected anywhere.
+	Live(ids []string) (map[string]string, error)
 	SendToInstance(instanceID, connectionID, msgType string, data []byte) error
 
 	Subscribe(channel string, callback func(message []byte)) error
@@ -41,20 +63,59 @@ func NewRedisConnectionStore(client *redis.Client) *RedisConnectionStore {
 	}
 }
 func (r *RedisConnectionStore) Register(id string, instanceID string) error {
-	key := connectionPrefix + id
-	err := r.client.Set(context.Background(), key, instanceID, connectionTTL).Err()
-	return err
+	return r.client.Set(context.Background(), connectionPrefix+id, instanceID, connectionTTL).Err()
 }
 
-func (r *RedisConnectionStore) Unregister(id string) error {
-	key := connectionPrefix + id
-	err := r.client.Del(context.Background(), key).Err()
-	return err
+// releaseScript deletes a lease only while it still names the caller.
+var releaseScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+end
+return 0`)
+
+func (r *RedisConnectionStore) Unregister(id string, instanceID string) (bool, error) {
+	n, err := releaseScript.Run(context.Background(), r.client, []string{connectionPrefix + id}, instanceID).Int()
+	return n == 1, err
 }
 
-func (r *RedisConnectionStore) Refresh(id string) error {
-	key := connectionPrefix + id
-	return r.client.Expire(context.Background(), key, connectionTTL).Err()
+// refreshScript renews the caller's lease, reclaims a lapsed one, and leaves
+// another instance's alone.
+var refreshScript = redis.NewScript(`
+local holder = redis.call("GET", KEYS[1])
+if holder == false then
+	redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+	return 1
+end
+if holder == ARGV[1] then
+	redis.call("PEXPIRE", KEYS[1], ARGV[2])
+	return 1
+end
+return 0`)
+
+func (r *RedisConnectionStore) Refresh(id string, instanceID string) (bool, error) {
+	n, err := refreshScript.Run(context.Background(), r.client, []string{connectionPrefix + id}, instanceID, connectionTTL.Milliseconds()).Int()
+	return n == 1, err
+}
+
+func (r *RedisConnectionStore) Live(ids []string) (map[string]string, error) {
+	live := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return live, nil
+	}
+	keys := make([]string, len(ids))
+	for i, id := range ids {
+		keys[i] = connectionPrefix + id
+	}
+	vals, err := r.client.MGet(context.Background(), keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+	for i, v := range vals {
+		if holder, ok := v.(string); ok {
+			live[ids[i]] = holder
+		}
+	}
+	return live, nil
 }
 
 // FindConnection looks up which instance has a given connection

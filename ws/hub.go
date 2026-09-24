@@ -41,7 +41,7 @@ func NewHub(instanceID string, connectionStore ConnectionStore) *Hub {
 				Data         json.RawMessage `json:"data"`
 			}
 			if err := json.Unmarshal(message, &msg); err != nil {
-				logging.Error("ws").Msgf( "failed to unmarshal instance message: %v", err)
+				logging.Error("ws").Msgf("failed to unmarshal instance message: %v", err)
 				return
 			}
 
@@ -50,7 +50,7 @@ func NewHub(instanceID string, connectionStore ConnectionStore) *Hub {
 				var data any
 				if len(msg.Data) > 0 {
 					if err := json.Unmarshal(msg.Data, &data); err != nil {
-						logging.Error("ws").Msgf( "failed to unmarshal message data: %v", err)
+						logging.Error("ws").Msgf("failed to unmarshal message data: %v", err)
 						return
 					}
 				}
@@ -66,15 +66,24 @@ func NewHub(instanceID string, connectionStore ConnectionStore) *Hub {
 
 func (h *Hub) startTTLRefresh() {
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(connectionRefreshEvery)
 		defer ticker.Stop()
 
 		for range ticker.C {
 			h.ttlMu.RLock()
+			ids := make([]string, 0, len(h.ttlKeys))
 			for id := range h.ttlKeys {
-				_ = h.connectionStore.Refresh(id)
+				ids = append(ids, id)
 			}
 			h.ttlMu.RUnlock()
+			for _, id := range ids {
+				owned, err := h.connectionStore.Refresh(id, h.instanceID)
+				if err != nil {
+					logging.Warn("ws").Msgf("failed to renew connection lease for %s: %v", id, err)
+				} else if !owned {
+					logging.Info("ws").Msgf("connection lease for %s is held by another instance; not renewing", id)
+				}
+			}
 		}
 	}()
 }
@@ -94,20 +103,24 @@ func (h *Hub) Register(id string, conn *ServerConnection) {
 	h.ttlMu.Unlock()
 	if h.connectionStore != nil {
 		if err := h.connectionStore.Register(id, h.instanceID); err != nil {
-			logging.Error("ws").Msgf( "failed to register connection in pubsub: %v", err)
+			logging.Error("ws").Msgf("failed to register connection in pubsub: %v", err)
 		}
 	}
 }
 
-// Unregister removes a connection from the hub.
+// Unregister removes a connection from the hub and releases its lease, and
+// reports whether this instance still held the connection: false when a newer
+// connection replaced it here or on another instance. Only a true result means
+// the connection is really gone; the caller should record a disconnect only
+// then.
 // If conn is provided, only removes if it matches the current connection (prevents race on reconnect).
-func (h *Hub) Unregister(id string, conn *ServerConnection) {
+func (h *Hub) Unregister(id string, conn *ServerConnection) bool {
 	if conn != nil {
 		// Only unregister if this is still the active connection
 		current, loaded := h.connections.Load(id)
 		if !loaded || current != conn {
 			logging.Info("ws").Msgf("Skipping unregister for %s: conn_id=%s was already replaced", id, conn.ID)
-			return // Connection was replaced by a newer one
+			return false // Connection was replaced by a newer one
 		}
 	}
 
@@ -122,11 +135,34 @@ func (h *Hub) Unregister(id string, conn *ServerConnection) {
 	h.ttlMu.Lock()
 	delete(h.ttlKeys, id)
 	h.ttlMu.Unlock()
+	if h.connectionStore == nil {
+		return true
+	}
+	owned, err := h.connectionStore.Unregister(id, h.instanceID)
+	if err != nil {
+		logging.Error("ws").Msgf("failed to release connection lease for %s: %v", id, err)
+		return false
+	}
+	if !owned {
+		logging.Info("ws").Msgf("connection lease for %s is held by another instance; left in place", id)
+	}
+	return owned
+}
+
+// Live reports which of ids are connected, and on which instance. With a
+// connection store that is the cross-instance leases; without one, this
+// instance's own connections.
+func (h *Hub) Live(ids []string) (map[string]string, error) {
 	if h.connectionStore != nil {
-		if err := h.connectionStore.Unregister(id); err != nil {
-			logging.Error("ws").Msgf( "failed to unregister connection in pubsub: %v", err)
+		return h.connectionStore.Live(ids)
+	}
+	live := make(map[string]string, len(ids))
+	for _, id := range ids {
+		if _, ok := h.connections.Load(id); ok {
+			live[id] = h.instanceID
 		}
 	}
+	return live, nil
 }
 
 // ConnectionState represents the state of a connection
@@ -149,14 +185,14 @@ func (h *Hub) GetConnectionState(id string) ConnectionState {
 	if h.connectionStore != nil {
 		instanceID, err := h.connectionStore.Find(id)
 		if err != nil {
-			logging.Error("ws").Msgf( "Failed to find connection: %v", err)
+			logging.Error("ws").Msgf("Failed to find connection: %v", err)
 			return ConnectionNotFound
 		}
 		if instanceID != nil {
 			return ConnectionRemote
 		}
 	} else {
-		logging.Info("ws").Msgf( "No pubsub found, only checking local connections")
+		logging.Info("ws").Msgf("No pubsub found, only checking local connections")
 	}
 
 	return ConnectionNotFound
@@ -174,10 +210,10 @@ func (h *Hub) GetConnection(id string) (*ServerConnection, bool) {
 			}
 		}
 	case ConnectionRemote:
-		logging.Info("ws").Msgf( "Connection found on another instance, returning false")
+		logging.Info("ws").Msgf("Connection found on another instance, returning false")
 		return nil, false
 	case ConnectionNotFound:
-		logging.Info("ws").Msgf( "Connection not found anywhere")
+		logging.Info("ws").Msgf("Connection not found anywhere")
 		return nil, false
 	}
 
@@ -195,7 +231,7 @@ func (h *Hub) IsConnectionAvailable(id string) bool {
 	if h.connectionStore != nil {
 		instanceID, err := h.connectionStore.Find(id)
 		if err != nil {
-			logging.Error("ws").Msgf( "failed to find connection: %v", err)
+			logging.Error("ws").Msgf("failed to find connection: %v", err)
 			return false
 		}
 		return instanceID != nil
@@ -214,7 +250,7 @@ func (h *Hub) CanSendMessage(id string) bool {
 	if h.connectionStore != nil {
 		instanceID, err := h.connectionStore.Find(id)
 		if err != nil {
-			logging.Error("ws").Msgf( "Failed to find connection: %v", err)
+			logging.Error("ws").Msgf("Failed to find connection: %v", err)
 			return false
 		}
 		if instanceID == nil {
@@ -315,7 +351,7 @@ func (h *Hub) SubscribeToChannel(ctx context.Context, channel string, callback f
 		var msg RawMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
 			// Log error but don't stop processing
-			logging.Error("ws").Msgf( "failed to unmarshal message: %v", err)
+			logging.Error("ws").Msgf("failed to unmarshal message: %v", err)
 			return
 		}
 		callback(msg)
