@@ -235,17 +235,8 @@ func (c *ClientConnection) Listen(ctx context.Context) {
 				continue // Let recws handle reconnection
 			}
 
-			// Send to message buffer for processing
-			select {
-			case c.msgBuffer <- msg:
-				// Message queued successfully
-			default:
-				logging.Warn("ws").Msgf( "Message buffer full, processing synchronously")
-				if handler, ok := c.handlers[msg.Type]; ok {
-					handler.Handle(c.ctx, msg)
-				} else {
-					logging.Error("ws").Msgf( "No handler for message type: %s", msg.Type)
-				}
+			if !c.enqueue(ctx, c.done, msg) {
+				return
 			}
 		}
 	}
