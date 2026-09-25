@@ -76,13 +76,12 @@ func (h *Hub) startTTLRefresh() {
 				ids = append(ids, id)
 			}
 			h.ttlMu.RUnlock()
-			for _, id := range ids {
-				owned, err := h.connectionStore.Refresh(id, h.instanceID)
-				if err != nil {
-					logging.Warn("ws").Msgf("failed to renew connection lease for %s: %v", id, err)
-				} else if !owned {
-					logging.Info("ws").Msgf("connection lease for %s is held by another instance; not renewing", id)
-				}
+			heldElsewhere, err := h.connectionStore.Refresh(ids, h.instanceID)
+			if err != nil {
+				logging.Warn("ws").Msgf("failed to renew %d connection lease(s): %v", len(ids), err)
+			}
+			for _, id := range heldElsewhere {
+				logging.Info("ws").Msgf("connection lease for %s is held by another instance; not renewing", id)
 			}
 		}
 	}()

@@ -35,10 +35,10 @@ type ConnectionStore interface {
 	// reports whether it did. False means the connection moved to another
 	// instance (or the lease had lapsed): the caller no longer speaks for it.
 	Unregister(id, instanceID string) (bool, error)
-	// Refresh renews the lease if instanceID holds it, reclaims it if it lapsed
-	// while the connection is still open here, and reports false only when
-	// another instance holds it.
-	Refresh(id, instanceID string) (bool, error)
+	// Refresh renews each lease in ids that instanceID holds, reclaims any that
+	// lapsed while the connection is still open here, and returns the ids
+	// another instance holds, which it leaves alone. One round trip per batch.
+	Refresh(ids []string, instanceID string) (heldElsewhere []string, err error)
 	// Find returns the instance holding id, or nil when no one does.
 	Find(id string) (*string, error)
 	// Live returns, for the ids that have a holder, which instance holds each,
@@ -78,23 +78,46 @@ func (r *RedisConnectionStore) Unregister(id string, instanceID string) (bool, e
 	return n == 1, err
 }
 
-// refreshScript renews the caller's lease, reclaims a lapsed one, and leaves
-// another instance's alone.
+// refreshScript renews each of the caller's leases, reclaims lapsed ones, and
+// leaves another instance's alone, returning 1 or 0 per key in order.
 var refreshScript = redis.NewScript(`
-local holder = redis.call("GET", KEYS[1])
-if holder == false then
-	redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
-	return 1
+local held = {}
+for i, key in ipairs(KEYS) do
+	local holder = redis.call("GET", key)
+	if holder == false then
+		redis.call("SET", key, ARGV[1], "PX", ARGV[2])
+		held[i] = 1
+	elseif holder == ARGV[1] then
+		redis.call("PEXPIRE", key, ARGV[2])
+		held[i] = 1
+	else
+		held[i] = 0
+	end
 end
-if holder == ARGV[1] then
-	redis.call("PEXPIRE", KEYS[1], ARGV[2])
-	return 1
-end
-return 0`)
+return held`)
 
-func (r *RedisConnectionStore) Refresh(id string, instanceID string) (bool, error) {
-	n, err := refreshScript.Run(context.Background(), r.client, []string{connectionPrefix + id}, instanceID, connectionTTL.Milliseconds()).Int()
-	return n == 1, err
+// refreshBatch bounds how many leases one refresh script touches.
+const refreshBatch = 500
+
+func (r *RedisConnectionStore) Refresh(ids []string, instanceID string) ([]string, error) {
+	var heldElsewhere []string
+	for start := 0; start < len(ids); start += refreshBatch {
+		batch := ids[start:min(start+refreshBatch, len(ids))]
+		keys := make([]string, len(batch))
+		for i, id := range batch {
+			keys[i] = connectionPrefix + id
+		}
+		held, err := refreshScript.Run(context.Background(), r.client, keys, instanceID, connectionTTL.Milliseconds()).Int64Slice()
+		if err != nil {
+			return heldElsewhere, err
+		}
+		for i, h := range held {
+			if h == 0 {
+				heldElsewhere = append(heldElsewhere, batch[i])
+			}
+		}
+	}
+	return heldElsewhere, nil
 }
 
 func (r *RedisConnectionStore) Live(ids []string) (map[string]string, error) {

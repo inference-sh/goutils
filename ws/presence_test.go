@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -51,17 +52,17 @@ func TestUnregister_onlyTheHolderReleases(t *testing.T) {
 	}
 }
 
-// Refresh renews the holder's lease, reclaims a lapsed one, and never takes
-// another instance's.
+// Refresh renews the holder's leases, reclaims lapsed ones, and never takes
+// another instance's, reporting those.
 func TestRefresh_renewsReclaimsNeverSteals(t *testing.T) {
 	s, mr := newTestStore(t)
 	must(t, s.Register("remote-1", "instance-a"))
 
 	mr.FastForward(connectionTTL - time.Second)
-	owned, err := s.Refresh("remote-1", "instance-a")
+	elsewhere, err := s.Refresh([]string{"remote-1"}, "instance-a")
 	must(t, err)
 	mr.FastForward(connectionTTL - time.Second)
-	if !owned || holder(t, s, "remote-1") != "instance-a" {
+	if len(elsewhere) != 0 || holder(t, s, "remote-1") != "instance-a" {
 		t.Fatal("a renewed lease must outlive its original TTL")
 	}
 
@@ -69,17 +70,41 @@ func TestRefresh_renewsReclaimsNeverSteals(t *testing.T) {
 	if holder(t, s, "remote-1") != "" {
 		t.Fatal("lease should have lapsed")
 	}
-	owned, err = s.Refresh("remote-1", "instance-a")
+	elsewhere, err = s.Refresh([]string{"remote-1"}, "instance-a")
 	must(t, err)
-	if !owned || holder(t, s, "remote-1") != "instance-a" {
+	if len(elsewhere) != 0 || holder(t, s, "remote-1") != "instance-a" {
 		t.Fatal("the instance holding the socket must reclaim a lapsed lease")
 	}
 
 	must(t, s.Register("remote-1", "instance-b"))
-	owned, err = s.Refresh("remote-1", "instance-a")
+	elsewhere, err = s.Refresh([]string{"remote-1"}, "instance-a")
 	must(t, err)
-	if owned || holder(t, s, "remote-1") != "instance-b" {
-		t.Fatal("refresh must not take another instance's lease")
+	if len(elsewhere) != 1 || elsewhere[0] != "remote-1" || holder(t, s, "remote-1") != "instance-b" {
+		t.Fatalf("refresh must not take another instance's lease; elsewhere %v", elsewhere)
+	}
+}
+
+// Refresh spans batches: every lease renewed, only the other instance's
+// reported, whichever batch it falls in.
+func TestRefresh_acrossBatches(t *testing.T) {
+	s, mr := newTestStore(t)
+	ids := make([]string, refreshBatch+37)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("remote-%04d", i)
+		must(t, s.Register(ids[i], "instance-a"))
+	}
+	stolen := ids[refreshBatch+5] // in the second batch
+	must(t, s.Register(stolen, "instance-b"))
+
+	mr.FastForward(connectionTTL - time.Second)
+	elsewhere, err := s.Refresh(ids, "instance-a")
+	must(t, err)
+	if len(elsewhere) != 1 || elsewhere[0] != stolen {
+		t.Fatalf("elsewhere %v, want [%s]", elsewhere, stolen)
+	}
+	mr.FastForward(connectionTTL - time.Second)
+	if holder(t, s, ids[0]) != "instance-a" || holder(t, s, ids[len(ids)-1]) != "instance-a" {
+		t.Fatal("leases in both batches must be renewed")
 	}
 }
 
