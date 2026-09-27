@@ -25,6 +25,12 @@ type LogArchiver struct {
 	started  bool
 }
 
+// markerDir holds one empty file per uploaded log, named after it. It is how
+// the archiver remembers across restarts what it already shipped: a file
+// rotated just before a restart and not yet uploaded has no marker, so the
+// next process uploads it instead of taking it for old news.
+const markerDir = ".archived"
+
 // NewLogArchiver creates an archiver for the given log directory.
 // Call Start() to begin watching.
 func NewLogArchiver(logDir string, fn ArchiveFunc) *LogArchiver {
@@ -35,16 +41,23 @@ func NewLogArchiver(logDir string, fn ArchiveFunc) *LogArchiver {
 		failures: make(map[string]int),
 	}
 
-	// snapshot existing files so we don't re-upload old ones on startup
-	if entries, err := os.ReadDir(logDir); err == nil {
+	if entries, err := os.ReadDir(filepath.Join(logDir, markerDir)); err == nil {
 		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".gz") {
-				a.known[e.Name()] = struct{}{}
-			}
+			a.known[e.Name()] = struct{}{}
 		}
 	}
 
 	return a
+}
+
+// markArchived records name as uploaded, in memory and on disk. A marker
+// that can't be written only costs a duplicate upload after a restart.
+func (a *LogArchiver) markArchived(name string) {
+	a.known[name] = struct{}{}
+	dir := filepath.Join(a.dir, markerDir)
+	if err := os.MkdirAll(dir, 0o755); err == nil {
+		_ = os.WriteFile(filepath.Join(dir, name), nil, 0o644)
+	}
 }
 
 // Start begins the background scan loop. Safe to call once.
@@ -73,6 +86,9 @@ func (a *LogArchiver) Stop() {
 func (a *LogArchiver) loop(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
+
+	// Catch up on anything a previous process rotated but never shipped.
+	a.scan()
 
 	for {
 		select {
@@ -114,6 +130,8 @@ func (a *LogArchiver) scan() {
 			a.failures[e.Name()]++
 			count := a.failures[e.Name()]
 			if count >= 3 {
+				// Given up for this process only: no marker, so the next
+				// process tries again.
 				a.known[e.Name()] = struct{}{}
 				delete(a.failures, e.Name())
 				a.mu.Unlock()
@@ -128,7 +146,7 @@ func (a *LogArchiver) scan() {
 		Info("archive").Str("file", e.Name()).Msg("archived rotated log")
 
 		a.mu.Lock()
-		a.known[e.Name()] = struct{}{}
+		a.markArchived(e.Name())
 		delete(a.failures, e.Name())
 		a.mu.Unlock()
 	}
@@ -138,6 +156,7 @@ func (a *LogArchiver) scan() {
 	for name := range a.known {
 		if _, exists := current[name]; !exists {
 			delete(a.known, name)
+			_ = os.Remove(filepath.Join(a.dir, markerDir, name))
 		}
 	}
 	for name := range a.failures {
@@ -149,7 +168,15 @@ func (a *LogArchiver) scan() {
 }
 
 // ArchiveKey returns a storage key for a log file.
-// Format: logs/{source}/{filename}
+// Format: logs/{source}/{filename}, or logs/audit/{source}/{filename} for the
+// audit log, so audit files can carry their own retention rule.
 func ArchiveKey(source, filePath string) string {
-	return fmt.Sprintf("logs/%s/%s", source, filepath.Base(filePath))
+	name := filepath.Base(filePath)
+	if strings.HasPrefix(name, auditRotatedPrefix) {
+		return fmt.Sprintf("logs/audit/%s/%s", source, name)
+	}
+	return fmt.Sprintf("logs/%s/%s", source, name)
 }
+
+// auditRotatedPrefix starts every rotated copy of AuditFilename.
+var auditRotatedPrefix = strings.TrimSuffix(AuditFilename, filepath.Ext(AuditFilename)) + "-"

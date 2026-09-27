@@ -42,13 +42,31 @@ type Config struct {
 	Compress   bool        // Compress rotated files
 	Console    ConsoleMode // Console output mode
 	Level      zerolog.Level
+
+	// Audit, when true, also writes every Audit event to its own file,
+	// AuditFilename in Dir, beside the main log. It rotates at least hourly
+	// so audit events reach the archive within the hour however few there
+	// are, and its rotated files archive under logs/audit/ (see ArchiveKey).
+	Audit bool
 }
+
+// AuditFilename is the audit log's file name. Rotated copies are named
+// audit-<timestamp>.txt.gz, which is how ArchiveKey recognizes them.
+const AuditFilename = "audit.txt"
+
+// auditRotateEvery bounds how long an audit event waits on disk before its
+// file is rotated and becomes archivable.
+const auditRotateEvery = time.Hour
 
 // Root is the global logger. Set by Init(), defaults to stderr.
 var Root = zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}).
 	With().Timestamp().Logger().Level(zerolog.InfoLevel)
 
 var tuiHandler io.Writer
+
+// auditRoot is the logger Audit writes to: Root plus the audit file when one
+// is configured, otherwise Root itself.
+var auditRoot *zerolog.Logger
 
 // SetTUIHandler sets a custom writer for TUI mode console output.
 // Must be called before Init.
@@ -88,7 +106,36 @@ func Init(cfg Config) error {
 	Root = zerolog.New(zerolog.MultiLevelWriter(writers...)).
 		With().Timestamp().Logger().
 		Level(cfg.Level)
+
+	auditRoot = nil
+	if cfg.Audit {
+		auditFile := &lumberjack.Logger{
+			Filename: filepath.Join(cfg.Dir, AuditFilename),
+			MaxSize:  cfg.MaxSize,
+			MaxAge:   cfg.MaxAge,
+			Compress: cfg.Compress,
+		}
+		l := zerolog.New(zerolog.MultiLevelWriter(append(writers, auditFile)...)).
+			With().Timestamp().Logger().
+			Level(zerolog.InfoLevel)
+		auditRoot = &l
+		go rotateWhenWritten(auditFile, auditRotateEvery)
+	}
 	return nil
+}
+
+// rotateWhenWritten rotates f every interval when it holds anything, so a
+// low-volume log still produces a file to archive.
+func rotateWhenWritten(f *lumberjack.Logger, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if info, err := os.Stat(f.Filename); err == nil && info.Size() > 0 {
+			if err := f.Rotate(); err != nil {
+				Error("audit").Err(err).Msg("failed to rotate audit log")
+			}
+		}
+	}
 }
 
 // Level functions — return a *zerolog.Event tagged with the component name.

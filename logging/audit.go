@@ -13,7 +13,11 @@ type AuditContext struct {
 
 // Audit logs a structured audit event for compliance.
 func Audit(action, actorID, targetType, targetID, outcome string, ctx *AuditContext) {
-	event := Root.Info().
+	logger := &Root
+	if auditRoot != nil {
+		logger = auditRoot
+	}
+	event := logger.Info().
 		Str("component", "audit").
 		Str("action", action).
 		Str("actor_id", actorID).
