@@ -53,3 +53,10 @@ func TestSchemas_marshal(t *testing.T) {
 		require.NoError(t, err)
 	}
 }
+
+func TestExtractInContext_isTheForkPromptWithoutTranscript(t *testing.T) {
+	p := ExtractInContext()
+	assert.Contains(t, p, "full conversation")
+	assert.NotContains(t, p, "<conversation>")
+	assert.NotContains(t, p, "belt skill use", "belt-only suggest-miss section stays in the CLI")
+}

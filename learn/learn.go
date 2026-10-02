@@ -19,6 +19,9 @@ var extractPrompt string
 //go:embed prompts/dedup.md
 var dedupPrompt string
 
+//go:embed prompts/extract-in-context.md
+var extractInContextPrompt string
+
 // ReviewEvery is how many user turns pass between reviews run at the end of a
 // turn. Reviews before compaction and at session end run regardless.
 const ReviewEvery = 10
@@ -61,6 +64,12 @@ type DedupAction struct {
 // <conversation> tag that ExtractPromptWith closes around the transcript.
 // Callers that let users override prompts start from it.
 func ExtractTemplate() string { return extractPrompt }
+
+// ExtractInContext asks for the reusable knowledge in the conversation the
+// model already has in context: a forked session (the CLI) or a review
+// branch of a chat (the platform). It sees tool calls and results, not just
+// the turns' text.
+func ExtractInContext() string { return extractInContextPrompt }
 
 // DedupTemplate is the default dedup prompt, with {{name}}, {{type}},
 // {{content}} and {{existing}} placeholders.
