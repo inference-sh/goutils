@@ -26,6 +26,11 @@ var _ Connection = (*ClientConnection)(nil)
 // ClientOptions contains configurable options for WebSocket client connections
 type ClientOptions struct {
 	Headers           http.Header
+	// HeaderFunc, when set, supplies the request header for every dial
+	// attempt in place of Headers. Use it when the credential can change
+	// while the connection lives — a daemon that outlasts a login — so a
+	// reconnect sends the current one rather than the one it started with.
+	HeaderFunc        func() http.Header
 	HandshakeTimeout  time.Duration
 	EnableCompression bool
 	ReadBufferSize    int
@@ -115,6 +120,7 @@ func NewClientConnectionWithOptions(url string, options ClientOptions) (*ClientC
 		RecIntvlMax:      options.RecIntvlMax,
 		RecIntvlFactor:   options.RecIntvlFactor,
 		KeepAliveTimeout: options.KeepAliveTimeout,
+		HeaderFunc:       options.HeaderFunc,
 		Logger:           slogAdapter,
 	}
 
