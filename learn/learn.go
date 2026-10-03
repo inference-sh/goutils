@@ -140,12 +140,41 @@ func ParseCandidates(raw []byte) []Candidate {
 
 // ParseDedup reads a dedup answer. Anything unreadable or without an action
 // is a create: a duplicate costs less than a lost insight.
-func ParseDedup(raw []byte) DedupAction {
+//
+// An update's target is resolved against the entries the model was shown.
+// The field is free text and models write prose into it ("team/known as the
+// merge target"), which, used as a name, saved the merge as a new entry named
+// after the sentence. A target naming none of them is not an update: the
+// candidate is created under its own name.
+func ParseDedup(raw []byte, existing []Existing) DedupAction {
 	var a DedupAction
 	if err := json.Unmarshal(raw, &a); err != nil || a.Action == "" {
 		return DedupAction{Action: DedupCreate}
 	}
+	if a.Action == DedupUpdate {
+		target, ok := resolveTarget(a.Target, existing)
+		if !ok {
+			return DedupAction{Action: DedupCreate}
+		}
+		a.Target = target
+	}
 	return a
+}
+
+// resolveTarget finds the shown ref the target names: the first
+// whitespace-delimited token of the target that is one of them, with
+// surrounding punctuation stripped.
+func resolveTarget(target string, existing []Existing) (string, bool) {
+	refs := make(map[string]bool, len(existing))
+	for _, e := range existing {
+		refs[e.Ref] = true
+	}
+	for _, tok := range strings.Fields(target) {
+		if tok = strings.Trim(tok, ".,;:()\"'`"); refs[tok] {
+			return tok, true
+		}
+	}
+	return "", false
 }
 
 // CandidatesSchema is the JSON schema an extraction answer conforms to.
@@ -174,15 +203,25 @@ func candidateSchema() map[string]any {
 	}
 }
 
-// DedupSchema is the JSON schema a dedup answer conforms to.
-func DedupSchema() map[string]any {
+// DedupSchema is the JSON schema a dedup answer conforms to. Given the entries
+// the model was shown, target is an enum of their refs, so a provider that
+// enforces the schema cannot answer with prose where a ref belongs.
+func DedupSchema(existing []Existing) map[string]any {
+	target := map[string]any{"type": "string"}
+	if len(existing) > 0 {
+		refs := make([]any, len(existing))
+		for i, e := range existing {
+			refs[i] = e.Ref
+		}
+		target["enum"] = refs
+	}
 	return map[string]any{
 		"type":                 "object",
 		"additionalProperties": false,
 		"required":             []any{"action"},
 		"properties": map[string]any{
 			"action":  map[string]any{"type": "string", "enum": []any{DedupCreate, DedupUpdate, DedupSkip}},
-			"target":  map[string]any{"type": "string"},
+			"target":  target,
 			"content": map[string]any{"type": "string"},
 			"reason":  map[string]any{"type": "string"},
 		},

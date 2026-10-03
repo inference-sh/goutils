@@ -40,15 +40,48 @@ func TestParseCandidates_dropsIncomplete(t *testing.T) {
 }
 
 func TestParseDedup_defaultsToCreate(t *testing.T) {
-	assert.Equal(t, DedupCreate, ParseDedup([]byte("garbage")).Action)
-	assert.Equal(t, DedupCreate, ParseDedup([]byte(`{}`)).Action)
-	a := ParseDedup([]byte(`{"action":"update","target":"t/x","content":"merged"}`))
+	shown := []Existing{{Ref: "t/x"}}
+	assert.Equal(t, DedupCreate, ParseDedup([]byte("garbage"), shown).Action)
+	assert.Equal(t, DedupCreate, ParseDedup([]byte(`{}`), shown).Action)
+	a := ParseDedup([]byte(`{"action":"update","target":"t/x","content":"merged"}`), shown)
 	assert.Equal(t, DedupUpdate, a.Action)
 	assert.Equal(t, "t/x", a.Target)
 }
 
+// The target is free text. Prose around a shown ref still names it; a target
+// naming none of them makes the answer a create.
+func TestParseDedup_updateTargetMustBeAShownRef(t *testing.T) {
+	shown := []Existing{{Ref: "team/known"}, {Ref: "team/known-v2"}}
+	cases := map[string]struct {
+		target     string
+		wantAction string
+		wantTarget string
+	}{
+		"prose after the ref":            {"team/known as the merge target", DedupUpdate, "team/known"},
+		"ref not first":                  {"update team/known-v2 (content below)", DedupUpdate, "team/known-v2"},
+		"quoted":                         {`"team/known".`, DedupUpdate, "team/known"},
+		"none shown":                     {"see below", DedupCreate, ""},
+		"a longer name is another entry": {"team/known-but-different", DedupCreate, ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw := []byte(`{"action":"update","target":"` + strings.ReplaceAll(tc.target, `"`, `\"`) + `","content":"merged"}`)
+			a := ParseDedup(raw, shown)
+			assert.Equal(t, tc.wantAction, a.Action)
+			assert.Equal(t, tc.wantTarget, a.Target)
+		})
+	}
+}
+
+func TestDedupSchema_targetIsAnEnumOfTheShownRefs(t *testing.T) {
+	props := DedupSchema([]Existing{{Ref: "a/b"}, {Ref: "c/d"}})["properties"].(map[string]any)
+	assert.Equal(t, []any{"a/b", "c/d"}, props["target"].(map[string]any)["enum"])
+	_, hasEnum := DedupSchema(nil)["properties"].(map[string]any)["target"].(map[string]any)["enum"]
+	assert.False(t, hasEnum, "nothing shown: any string, since the answer can only be create")
+}
+
 func TestSchemas_marshal(t *testing.T) {
-	for _, s := range []map[string]any{CandidatesSchema(), DedupSchema()} {
+	for _, s := range []map[string]any{CandidatesSchema(), DedupSchema([]Existing{{Ref: "a/b"}})} {
 		_, err := json.Marshal(s)
 		require.NoError(t, err)
 	}
