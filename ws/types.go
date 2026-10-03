@@ -89,6 +89,9 @@ type BaseConnection struct {
 	msgBuffer   chan RawMessage
 	lanes       []chan RawMessage
 	orderingKey func(RawMessage) string
+	// messageContext builds each message's context from the connection's
+	// (SetMessageContext); nil hands every handler the connection's.
+	messageContext func(context.Context) context.Context
 }
 
 // NewBaseConnection creates a new base connection
@@ -127,6 +130,15 @@ func DefaultOrderingKey(msg RawMessage) string {
 // SetOrderingKey replaces DefaultOrderingKey (must be called before Listen).
 func (b *BaseConnection) SetOrderingKey(fn func(RawMessage) string) {
 	b.orderingKey = fn
+}
+
+// SetMessageContext makes fn build the context each message is handled
+// with, from the connection's, as HTTP middleware does for each request:
+// what belongs to one message (a request-scoped cache, a request id) starts
+// fresh for every message instead of living as long as the connection.
+// Must be called before Listen.
+func (b *BaseConnection) SetMessageContext(fn func(context.Context) context.Context) {
+	b.messageContext = fn
 }
 
 // laneFor maps a message to its lane: the same key always gets the same lane.
@@ -180,7 +192,11 @@ func (b *BaseConnection) runLane(lane chan RawMessage) {
 
 func (b *BaseConnection) dispatch(msg RawMessage) {
 	if handler, ok := b.handlers[msg.Type]; ok {
-		handler.Handle(b.ctx, msg)
+		ctx := b.ctx
+		if b.messageContext != nil {
+			ctx = b.messageContext(ctx)
+		}
+		handler.Handle(ctx, msg)
 	} else {
 		logging.Error("ws").Msgf("No handler for message type: %s", msg.Type)
 	}
