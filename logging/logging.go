@@ -91,6 +91,8 @@ func Init(cfg Config) error {
 		Compress:   cfg.Compress,
 	}
 
+	go reopenWhenMoved(rotator, reopenCheckEvery)
+
 	writers := []io.Writer{rotator}
 
 	switch cfg.Console {
@@ -120,8 +122,43 @@ func Init(cfg Config) error {
 			Level(zerolog.InfoLevel)
 		auditRoot = &l
 		go rotateWhenWritten(auditFile, auditRotateEvery)
+		go reopenWhenMoved(auditFile, reopenCheckEvery)
 	}
 	return nil
+}
+
+// reopenCheckEvery bounds how long a process writes to a log file another
+// process rotated away before it is back on the live one.
+const reopenCheckEvery = 10 * time.Second
+
+// reopenWhenMoved closes f whenever the file at its path is no longer the one
+// it was writing to, so the next write reopens the path. Two processes write
+// one log file during a rolling deploy (both are the same instance): when one
+// rotates, the other keeps writing to the renamed file, which is compressed
+// and removed under it, and its lines are lost. A rotation of f's own moves
+// the path too; closing then costs one reopen.
+func reopenWhenMoved(f *lumberjack.Logger, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	var seen os.FileInfo
+	for range ticker.C {
+		seen = reopenIfMoved(f, seen)
+	}
+}
+
+// reopenIfMoved is one check of reopenWhenMoved: it returns the file now at
+// f's path, and closes f when that is not the file seen last time.
+func reopenIfMoved(f *lumberjack.Logger, seen os.FileInfo) os.FileInfo {
+	now, err := os.Stat(f.Filename)
+	if err != nil {
+		now = nil
+	}
+	if seen != nil && (now == nil || !os.SameFile(seen, now)) {
+		if err := f.Close(); err != nil {
+			Error("logging").Err(err).Str("file", f.Filename).Msg("failed to reopen moved log file")
+		}
+	}
+	return now
 }
 
 // rotateWhenWritten rotates f every interval when it holds anything, so a
