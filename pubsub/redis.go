@@ -33,7 +33,10 @@ type RedisPubSub struct {
 	client    *redis.Client
 	pubsub    *redis.PubSub
 	mu        sync.RWMutex
-	callbacks map[string]func(message []byte)
+	// callbacks holds every subscriber of each channel: a message on a
+	// channel reaches all of them, as Redis delivers it to every
+	// subscription.
+	callbacks map[string][]func(message []byte)
 	stopCh    chan struct{} // Closed to signal intentional shutdown
 
 	gapMu sync.RWMutex
@@ -43,7 +46,7 @@ type RedisPubSub struct {
 func NewRedisPubSub(client *redis.Client) *RedisPubSub {
 	return &RedisPubSub{
 		client:    client,
-		callbacks: make(map[string]func(message []byte)),
+		callbacks: make(map[string][]func(message []byte)),
 	}
 }
 
@@ -92,11 +95,15 @@ func (r *RedisPubSub) Publish(channel string, message []byte) error {
 	return r.client.Publish(context.Background(), channel, message).Err()
 }
 
+// Subscribe adds callback to channel's subscribers. A channel subscribed
+// more than once delivers each message to every callback: two subscribers of
+// one channel (the engine and remote hubs on an instance's channel) both
+// receive it, neither replaces the other.
 func (r *RedisPubSub) Subscribe(channel string, callback func(message []byte)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.callbacks[channel] = callback
+	r.callbacks[channel] = append(r.callbacks[channel], callback)
 
 	if r.pubsub == nil {
 		r.pubsub = r.client.Subscribe(context.Background())
@@ -105,7 +112,12 @@ func (r *RedisPubSub) Subscribe(channel string, callback func(message []byte)) e
 	}
 
 	if err := r.pubsub.Subscribe(context.Background(), channel); err != nil {
-		delete(r.callbacks, channel)
+		subs := r.callbacks[channel]
+		if len(subs) <= 1 {
+			delete(r.callbacks, channel)
+		} else {
+			r.callbacks[channel] = subs[:len(subs)-1]
+		}
 		return fmt.Errorf("failed to subscribe to channel: %w", err)
 	}
 
@@ -173,9 +185,9 @@ func (r *RedisPubSub) listen(ps *redis.PubSub, stopCh chan struct{}, lost bool) 
 			continue
 		}
 		r.mu.RLock()
-		callback, exists := r.callbacks[m.Channel]
+		callbacks := r.callbacks[m.Channel]
 		r.mu.RUnlock()
-		if exists {
+		for _, callback := range callbacks {
 			callback([]byte(m.Payload))
 		}
 	}
@@ -232,6 +244,7 @@ func (r *RedisPubSub) reopen(oldStopCh chan struct{}) {
 	r.mu.Unlock()
 }
 
+// Unsubscribe removes every subscriber of channel.
 func (r *RedisPubSub) Unsubscribe(channel string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

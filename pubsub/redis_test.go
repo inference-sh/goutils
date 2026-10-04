@@ -62,3 +62,33 @@ func TestRedisPubSub_ReportsAGapAfterTheConnectionDropsAndDeliversAgain(t *testi
 	}
 	publishUntilReceived("after")
 }
+
+// Two subscribers of one channel both receive each message: the engine and
+// remote hubs share an instance's channel, and the second must not replace
+// the first.
+func TestRedisPubSub_everySubscriberOfAChannelReceives(t *testing.T) {
+	srv := miniredis.RunT(t)
+	ps := NewRedisPubSub(redis.NewClient(&redis.Options{Addr: srv.Addr()}))
+	t.Cleanup(func() { _ = ps.Close() })
+
+	first, second := make(chan string, 4), make(chan string, 4)
+	if err := ps.Subscribe("instance_a", func(m []byte) { first <- string(m) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.Subscribe("instance_a", func(m []byte) { second <- string(m) }); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.Publish("instance_a", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	for name, ch := range map[string]chan string{"first": first, "second": second} {
+		select {
+		case m := <-ch:
+			if m != "hello" {
+				t.Fatalf("%s got %q", name, m)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the %s subscriber never received the message", name)
+		}
+	}
+}

@@ -45,8 +45,11 @@ func NewHub(instanceID string, connectionStore ConnectionStore) *Hub {
 				return
 			}
 
-			// Forward message to local connection
-			if conn, ok := hub.GetConnection(msg.ConnectionID); ok {
+			// Forward the message if this hub holds the connection. Every
+			// hub on the instance (engines, remotes) receives every message
+			// sent to the instance; the others ignore it.
+			if c, ok := hub.connections.Load(msg.ConnectionID); ok {
+				conn := c.(*ServerConnection)
 				var data any
 				if len(msg.Data) > 0 {
 					if err := json.Unmarshal(msg.Data, &data); err != nil {
@@ -363,6 +366,51 @@ func (h *Hub) UnsubscribeFromChannel(channel string) error {
 		return fmt.Errorf("no pubsub system configured")
 	}
 	return h.connectionStore.Unsubscribe(channel)
+}
+
+// LeaveAll sends every connection this hub holds away (Leave), for an
+// instance shutting down: peers reconnect to the instance taking over now,
+// not when this process exits. It returns the ids it held.
+func (h *Hub) LeaveAll() []string {
+	var ids []string
+	h.connections.Range(func(key, value any) bool {
+		if conn, ok := value.(*ServerConnection); ok {
+			ids = append(ids, key.(string))
+			_ = conn.Leave()
+		}
+		return true
+	})
+	return ids
+}
+
+// WaitMoved waits until each of ids is held by another instance (its peer
+// reconnected there), or ctx ends; it reports whether all moved. Without a
+// connection store there is nowhere to move to, and it returns at once.
+func (h *Hub) WaitMoved(ctx context.Context, ids []string) bool {
+	if h.connectionStore == nil || len(ids) == 0 {
+		return true
+	}
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		live, err := h.connectionStore.Live(ids)
+		if err == nil {
+			moved := 0
+			for _, id := range ids {
+				if at, ok := live[id]; ok && at != h.instanceID {
+					moved++
+				}
+			}
+			if moved == len(ids) {
+				return true
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
+	}
 }
 
 // GetAllConnections returns all active connections

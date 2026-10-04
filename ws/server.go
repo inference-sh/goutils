@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/websocket"
 	idgen "github.com/inference-sh/goutils/id"
@@ -131,6 +132,16 @@ func (c *ServerConnection) Listen(ctx context.Context) {
 }
 
 // Close closes the WebSocket connection
+// Leave tells the peer this server is going away (close code 1001), so a
+// reconnecting client moves to another instance at once, then closes.
+func (c *ServerConnection) Leave() error {
+	if c.conn != nil {
+		msg := websocket.FormatCloseMessage(websocket.CloseGoingAway, "server shutting down")
+		_ = c.conn.WriteControl(websocket.CloseMessage, msg, time.Now().Add(time.Second))
+	}
+	return c.Close()
+}
+
 func (c *ServerConnection) Close() error {
 	select {
 	case <-c.done:

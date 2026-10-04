@@ -1,6 +1,7 @@
 package pubsub
 
-// PubSub interface for scalable message distribution
+// PubSub interface for scalable message distribution. A message on a channel
+// reaches every callback subscribed to it; Unsubscribe removes them all.
 type PubSub interface {
 	Publish(channel string, message []byte) error
 	Subscribe(channel string, callback func(message []byte)) error
