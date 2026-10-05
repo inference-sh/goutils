@@ -131,3 +131,36 @@ func TestOrderingKeyFallsBack(t *testing.T) {
 		}
 	}
 }
+
+// A handler waiting for an answer on its own connection gets it, even when
+// the answer's key shares a lane with the waiting handler: an Unordered
+// message skips the lanes.
+func TestUnorderedAnswerReachesAWaitingHandler(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := NewBaseConnection(ctx)
+	// Every ordered message shares one lane, the worst case for a waiter.
+	b.SetOrderingKey(func(m RawMessage) string {
+		if m.Type == "answer" {
+			return Unordered
+		}
+		return "same"
+	})
+
+	answered := make(chan struct{})
+	got := make(chan bool, 1)
+	b.Handle("question", HandleFunc(func(_ context.Context, _ Message[struct{}]) {
+		select {
+		case <-answered:
+			got <- true
+		case <-time.After(2 * time.Second):
+			got <- false
+		}
+	}))
+	b.Handle("answer", HandleFunc(func(_ context.Context, _ Message[struct{}]) { close(answered) }))
+
+	feed(t, &b, []RawMessage{{Type: "question"}, {Type: "answer"}})
+	if !<-got {
+		t.Fatal("the answer waited behind the handler waiting for it")
+	}
+}

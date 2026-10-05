@@ -127,6 +127,14 @@ func DefaultOrderingKey(msg RawMessage) string {
 	return ids.WorkerID
 }
 
+// Unordered is the ordering key of a message that must not wait behind any
+// other: an answer that a handler on this connection may be blocked on. A
+// lane runs one handler at a time and several keys share a lane, so such an
+// answer queued in a lane could wait behind the very handler waiting for it.
+// It is handled at once, in its own goroutine; its handler must be quick and
+// safe to run out of order (hand the answer to whoever waits, nothing more).
+const Unordered = "\x00unordered"
+
 // SetOrderingKey replaces DefaultOrderingKey (must be called before Listen).
 func (b *BaseConnection) SetOrderingKey(fn func(RawMessage) string) {
 	b.orderingKey = fn
@@ -166,6 +174,10 @@ func (b *BaseConnection) processMessages() {
 		case <-b.closeChan:
 			return
 		case msg := <-b.msgBuffer:
+			if b.orderingKey(msg) == Unordered {
+				go b.dispatch(msg)
+				continue
+			}
 			select {
 			case b.lanes[b.laneFor(msg)] <- msg:
 			case <-b.ctx.Done():
