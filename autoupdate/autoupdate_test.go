@@ -178,6 +178,12 @@ func TestResolveSelfPathFollowsSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The temp dir itself may sit behind a link (/var is /private/var on
+	// macOS) or a short name (RUNNER~1 on Windows).
+	real, err = filepath.EvalSymlinks(real)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if resolved != real {
 		t.Errorf("symlink not resolved: want %s got %s", real, resolved)
 	}
