@@ -297,10 +297,13 @@ func (e *ErrNotWritable) Error() string {
 
 // PackageManagerUpdateCmd detects whether belt was installed by a package
 // manager and returns the appropriate update command (e.g. "brew upgrade belt").
-// Returns "" if no package manager owns the binary. It checks the resolved
-// binary path first (fast, no exec), then falls back to asking the package
-// manager directly if the path is ambiguous.
+// Returns "" if no package manager owns the binary. binPath may be a symlink:
+// Homebrew links /usr/local/bin/belt to its Cellar, and the link's own path
+// says nothing about who installed it.
 func PackageManagerUpdateCmd(binPath string) string {
+	if resolved, err := filepath.EvalSymlinks(binPath); err == nil {
+		binPath = resolved
+	}
 	return packageManagerUpdateCmd(binPath)
 }
 
