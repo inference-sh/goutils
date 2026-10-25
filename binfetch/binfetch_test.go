@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // binaryPayload is the content written into test archives, pretending to be a binary.
@@ -331,6 +333,9 @@ func TestDownloadAndInstallBinary_ReplacesExisting(t *testing.T) {
 }
 
 func TestSwapIntoPlace_ConcurrentNeverLosesBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this is the unix swap, a rename over the target; Windows refuses to rename over a file being replaced. TestSwapIntoPlace_WindowsWhileRunning covers the Windows swap")
+	}
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "belt")
 	if err := os.WriteFile(dest, []byte("old"), 0o755); err != nil {
@@ -382,5 +387,74 @@ func TestSwapIntoPlace_WindowsMovesOldAside(t *testing.T) {
 	got, _ := os.ReadFile(dest)
 	if string(got) != "new" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+// TestHelperRunning is the running binary in
+// TestSwapIntoPlace_WindowsWhileRunning: a copy of this test binary, kept
+// running until the test kills it.
+func TestHelperRunning(t *testing.T) {
+	if os.Getenv("BINFETCH_HELPER_RUNNING") == "" {
+		t.Skip("helper process")
+	}
+	time.Sleep(time.Minute)
+}
+
+// The Windows swap replaces a binary that is running, which Windows only
+// allows by renaming it aside, and the next swap cleans up the binary moved
+// aside once nothing runs it.
+func TestSwapIntoPlace_WindowsWhileRunning(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "belt.exe")
+	if err := os.WriteFile(dest, exe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(dest, "-test.run=^TestHelperRunning$")
+	cmd.Env = append(os.Environ(), "BINFETCH_HELPER_RUNNING=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	stop := func() {
+		if !stopped {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			stopped = true
+		}
+	}
+	t.Cleanup(stop)
+
+	staging := filepath.Join(dir, ".belt.exe.new-1")
+	if err := os.WriteFile(staging, []byte("new"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := swapIntoPlace(staging, dest, true); err != nil {
+		t.Fatalf("swap over a running binary: %v", err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "new" {
+		t.Fatalf("dest is not the new binary after the swap")
+	}
+
+	stop()
+	staging = filepath.Join(dir, ".belt.exe.new-2")
+	if err := os.WriteFile(staging, []byte("newer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := swapIntoPlace(staging, dest, true); err != nil {
+		t.Fatalf("second swap: %v", err)
+	}
+	if got, _ := os.ReadFile(dest); string(got) != "newer" {
+		t.Fatalf("dest is not the newer binary after the second swap")
+	}
+	if left, _ := filepath.Glob(dest + ".old*"); len(left) != 0 {
+		t.Fatalf("binaries moved aside are left once nothing runs them: %v", left)
 	}
 }
