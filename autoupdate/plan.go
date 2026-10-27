@@ -31,7 +31,8 @@ func (e *ErrManaged) Error() string {
 type Plan struct {
 	From string
 	To   string
-	// UpdateAvailable is false when From is already the latest release.
+	// UpdateAvailable is whether Install changes the binary: To is newer
+	// than From, or, with Config.Exact, To is any other version.
 	UpdateAvailable bool
 	// SelfPath is the binary the install replaces, symlinks resolved. A
 	// restart runs this path.
@@ -42,7 +43,7 @@ type Plan struct {
 }
 
 // Prepare reads the release manifest and checks that this install can
-// replace itself. It fails with ErrDevBuild, *ErrManaged or *ErrNotWritable
+// replace itself (Config.SelfPath, or the running binary). It fails with ErrDevBuild, *ErrManaged or *ErrNotWritable
 // when the binary cannot update itself, whatever the manifest says, and with
 // a wrapped error when the manifest cannot be read. It ignores DisabledEnv,
 // CheckInterval and the failed-install backoff: those pace automatic
@@ -52,21 +53,25 @@ func Prepare(cfg Config) (*Plan, error) {
 	if !cfg.Force && isDevVersion(cfg.CurrentVersion) {
 		return nil, ErrDevBuild
 	}
-	selfPath, err := cfg.selfPath()
+	selfPath, err := cfg.binary()
 	if err != nil {
 		return nil, fmt.Errorf("locate current binary: %w", err)
 	}
-	if cmd := packageManagerUpdateCmd(selfPath); cmd != "" {
+	if cmd := packageManagerUpdateCmd(selfPath, cfg.Package); cmd != "" {
 		return nil, &ErrManaged{Cmd: cmd}
 	}
 	info, err := updater.CheckVersion(cfg.ManifestURL, cfg.Platform, cfg.Arch, cfg.CurrentVersion)
 	if err != nil {
 		return nil, fmt.Errorf("check manifest: %w", err)
 	}
+	available := info.UpdateAvailable
+	if cfg.Exact {
+		available = info.AvailableVersion != cfg.CurrentVersion
+	}
 	p := &Plan{
 		From:            cfg.CurrentVersion,
 		To:              info.AvailableVersion,
-		UpdateAvailable: info.UpdateAvailable,
+		UpdateAvailable: available,
 		SelfPath:        selfPath,
 		info:            info,
 		cfg:             cfg,
