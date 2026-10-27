@@ -83,8 +83,14 @@ func TestPrepareThenInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
-	if !p.UpdateAvailable || p.From != "v1.0.0" || p.To != "v1.1.0" || p.SelfPath != self {
-		t.Fatalf("plan = %+v", p)
+	// The temp dir may sit behind a link (/var is /private/var on macOS) or
+	// a short name (RUNNER~1 on Windows); SelfPath is the resolved file.
+	real, err := filepath.EvalSymlinks(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.UpdateAvailable || p.From != "v1.0.0" || p.To != "v1.1.0" || p.SelfPath != real {
+		t.Fatalf("plan = %+v, want SelfPath %s", p, real)
 	}
 	if b, _ := os.ReadFile(self); string(b) != "old" {
 		t.Fatal("Prepare must not install")
