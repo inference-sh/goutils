@@ -161,7 +161,7 @@ func TestStateFileKeyedPerManifest(t *testing.T) {
 	}
 }
 
-func TestResolveSelfPathFollowsSymlinks(t *testing.T) {
+func TestBinaryFollowsSymlinks(t *testing.T) {
 	tmp := t.TempDir()
 	real := filepath.Join(tmp, "real-bin")
 	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
@@ -172,9 +172,7 @@ func TestResolveSelfPathFollowsSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// We can't easily change os.Executable() from a test, but the resolution
-	// helper takes a path so let's assert EvalSymlinks does its job there.
-	resolved, err := filepath.EvalSymlinks(link)
+	resolved, err := Config{SelfPath: link}.binary()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +227,7 @@ func TestFailedInstallBacksOff(t *testing.T) {
 		CurrentVersion: "v1.0.0",
 		CheckInterval:  1 * time.Hour,
 		StateDir:       tmp,
-		selfPath:       func() (string, error) { return filepath.Join(tmp, "belt"), nil },
+		SelfPath:       filepath.Join(tmp, "belt"),
 		execFn:         func(string, []string) error { t.Fatal("must not re-exec"); return nil },
 	}
 	applyDefaults(&cfg)

@@ -62,7 +62,7 @@ func planConfig(manifestURL, version, self string) Config {
 		CurrentVersion: version,
 		Platform:       "linux",
 		Arch:           "amd64",
-		selfPath:       func() (string, error) { return self, nil },
+		SelfPath:       self,
 	}
 }
 
@@ -197,7 +197,53 @@ func TestPackageManagerUpdateCmdFollowsLinks(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	if got := PackageManagerUpdateCmd(link); got != "brew upgrade belt" {
+	if got := PackageManagerUpdateCmd(link, "belt"); got != "brew upgrade belt" {
 		t.Fatalf("PackageManagerUpdateCmd(link) = %q, want the brew command", got)
+	}
+}
+
+// With Exact, a manifest naming an older build plans it; without, the
+// binary is current.
+func TestPrepareExact(t *testing.T) {
+	url := releaseServer(t, "v1.0.0", []byte("older"))
+	self := writeSelf(t, t.TempDir())
+
+	cfg := planConfig(url, "v1.1.0-canary.1", self)
+	p, err := Prepare(cfg)
+	if err != nil || p.UpdateAvailable {
+		t.Fatalf("plan = %+v, err = %v; an older release is not an update", p, err)
+	}
+
+	cfg.Exact = true
+	p, err = Prepare(cfg)
+	if err != nil || !p.UpdateAvailable || p.To != "v1.0.0" {
+		t.Fatalf("plan = %+v, err = %v; want v1.0.0 planned", p, err)
+	}
+	if err := p.Install(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(self); string(b) != "older" {
+		t.Fatalf("binary is %q, want the named release", b)
+	}
+
+	p, err = Prepare(planConfig(url, "v1.0.0", self))
+	if err != nil || p.UpdateAvailable {
+		t.Fatalf("plan = %+v, err = %v; the named release is running", p, err)
+	}
+}
+
+// The update command names the binary's package: Config.Package, or the
+// file name without its extension.
+func TestPrepareManagedNamesPackage(t *testing.T) {
+	url := releaseServer(t, "v1.1.0", []byte("new"))
+	cfg := planConfig(url, "v1.0.0", `/opt/homebrew/Cellar/engine/1.0.0/bin/engine`)
+	var managed *ErrManaged
+	if _, err := Prepare(cfg); !errors.As(err, &managed) || managed.Cmd != "brew upgrade engine" {
+		t.Fatalf("err = %v, want 'brew upgrade engine'", err)
+	}
+	cfg.SelfPath = `/home/u/scoop/apps/belt/current/inferencesh.exe`
+	cfg.Package = "belt"
+	if _, err := Prepare(cfg); !errors.As(err, &managed) || managed.Cmd != "scoop update belt" {
+		t.Fatalf("err = %v, want 'scoop update belt'", err)
 	}
 }

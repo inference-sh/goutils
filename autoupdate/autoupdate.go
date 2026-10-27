@@ -33,6 +33,7 @@ import (
 
 	"github.com/inference-sh/goutils/binfetch"
 	"github.com/inference-sh/goutils/dirs"
+	"github.com/inference-sh/goutils/reexec"
 	"github.com/inference-sh/goutils/updater"
 )
 
@@ -75,10 +76,25 @@ type Config struct {
 	Platform string
 	Arch     string
 
+	// SelfPath is the binary an update replaces. Empty is the running
+	// binary. Symlinks are resolved either way, so the update replaces the
+	// file a link points at and the link keeps working.
+	SelfPath string
+
+	// Package is this binary's name in a package manager, for the command
+	// that updates it there, e.g. "belt" for "brew upgrade belt". Empty is
+	// the binary's file name without its extension.
+	Package string
+
+	// Exact makes Prepare plan the manifest's version whenever it differs
+	// from CurrentVersion, older included: for a manifest that names the
+	// build to run, such as a pinned version or a channel being left.
+	// CheckAndReexec ignores it and only ever moves forward.
+	Exact bool
+
 	// Testing hooks — unexported, set via helpers in tests.
-	nowFn    func() time.Time
-	execFn   func(path string, args []string) error
-	selfPath func() (string, error)
+	nowFn  func() time.Time
+	execFn func(path string, args []string) error
 }
 
 // Result reports the outcome of a CheckAndReexec call.
@@ -179,7 +195,7 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 		}
 	}
 
-	selfPath, err := cfg.selfPath()
+	selfPath, err := cfg.binary()
 	if err != nil {
 		return nil, fmt.Errorf("locate current binary: %w", err)
 	}
@@ -187,7 +203,7 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 	// If installed via a package manager, don't attempt self-update —
 	// overwriting a managed binary confuses the package manager's version
 	// tracking. Return the update info so callers can surface it.
-	if cmd := packageManagerUpdateCmd(selfPath); cmd != "" {
+	if cmd := packageManagerUpdateCmd(selfPath, cfg.Package); cmd != "" {
 		return &Result{
 			UpdateAvailable: true,
 			FromVersion:     cfg.CurrentVersion,
@@ -295,20 +311,24 @@ func (e *ErrNotWritable) Error() string {
 	return fmt.Sprintf("cannot self-update: %s is not writable (%v)", filepath.Dir(e.Path), e.Err)
 }
 
-// PackageManagerUpdateCmd detects whether belt was installed by a package
-// manager and returns the appropriate update command (e.g. "brew upgrade belt").
+// PackageManagerUpdateCmd detects whether the binary at binPath was installed
+// by a package manager and returns the command that updates it there, e.g.
+// "brew upgrade belt" for pkg "belt" (empty pkg is the binary's file name).
 // Returns "" if no package manager owns the binary. binPath may be a symlink:
 // Homebrew links /usr/local/bin/belt to its Cellar, and the link's own path
 // says nothing about who installed it.
-func PackageManagerUpdateCmd(binPath string) string {
+func PackageManagerUpdateCmd(binPath, pkg string) string {
 	if resolved, err := filepath.EvalSymlinks(binPath); err == nil {
 		binPath = resolved
 	}
-	return packageManagerUpdateCmd(binPath)
+	return packageManagerUpdateCmd(binPath, pkg)
 }
 
-func packageManagerUpdateCmd(binPath string) string {
+func packageManagerUpdateCmd(binPath, pkg string) string {
 	p := filepath.ToSlash(binPath)
+	if pkg == "" {
+		pkg = strings.TrimSuffix(filepath.Base(binPath), ".exe")
+	}
 
 	// The resolved binary path is the ground truth. Package managers install
 	// into well-known directory structures — if the path doesn't match, this
@@ -316,11 +336,11 @@ func packageManagerUpdateCmd(binPath string) string {
 	// managers happen to be installed on the system.
 
 	if strings.Contains(p, "/Cellar/") || strings.Contains(p, "/homebrew/") {
-		return "brew upgrade belt"
+		return "brew upgrade " + pkg
 	}
 
 	if strings.Contains(p, "/scoop/apps/") {
-		return "scoop update belt"
+		return "scoop update " + pkg
 	}
 
 	return ""
@@ -343,10 +363,7 @@ func applyDefaults(cfg *Config) {
 		cfg.nowFn = time.Now
 	}
 	if cfg.execFn == nil {
-		cfg.execFn = reexec
-	}
-	if cfg.selfPath == nil {
-		cfg.selfPath = resolveSelfPath
+		cfg.execFn = reexec.Exec
 	}
 	if cfg.StateDir == "" {
 		cfg.StateDir = filepath.Join(dirs.GetCacheDirectory(), "autoupdate")
@@ -424,13 +441,16 @@ func writeState(path string, s *state) error {
 	return os.WriteFile(path, data, 0o644)
 }
 
-// resolveSelfPath returns the canonical path of the currently running binary,
-// following symlinks so a Homebrew-installed CLI updates the real file, not
-// the symlink in /opt/homebrew/bin.
-func resolveSelfPath() (string, error) {
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
+// binary returns the canonical path of the binary an update replaces,
+// SelfPath or the running one, following symlinks so an update replaces the
+// real file, not a link to it.
+func (cfg Config) binary() (string, error) {
+	exe := cfg.SelfPath
+	if exe == "" {
+		var err error
+		if exe, err = os.Executable(); err != nil {
+			return "", err
+		}
 	}
 	resolved, err := filepath.EvalSymlinks(exe)
 	if err != nil {
