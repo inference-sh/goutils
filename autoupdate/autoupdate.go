@@ -21,11 +21,11 @@
 package autoupdate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,6 +34,7 @@ import (
 
 	"github.com/inference-sh/goutils/binfetch"
 	"github.com/inference-sh/goutils/dirs"
+	"github.com/inference-sh/goutils/fileutil"
 	"github.com/inference-sh/goutils/reexec"
 	"github.com/inference-sh/goutils/updater"
 )
@@ -419,18 +420,10 @@ func stateFile(cfg Config) string {
 // its checksum, and is installed without a manifest read, so whoever can
 // write it picks the binary this process, perhaps root, runs next.
 func readState(path string) (*state, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || !ownFile(fi) {
+	data, err := fileutil.ReadOwnFile(path)
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, fileutil.ErrNotOwn) {
 		return nil, nil
 	}
-	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil, err
 	}
@@ -442,7 +435,9 @@ func readState(path string) (*state, error) {
 }
 
 // writeState persists the timestamp file. Best-effort — errors are ignored by
-// the caller since missing state just means "check again next time".
+// the caller since missing state just means "check again next time". A new
+// file is renamed over the old, so a link planted at path is replaced, not
+// followed, and the file is this process's user's.
 func writeState(path string, s *state) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -451,24 +446,7 @@ func writeState(path string, s *state) error {
 	if err != nil {
 		return err
 	}
-	// A new file renamed over the old: a link planted at path is replaced,
-	// not followed, and the file is this process's user's.
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // no-op once renamed
-	_, err = tmp.Write(data)
-	if err == nil {
-		err = tmp.Chmod(0o644)
-	}
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
+	return fileutil.WriteFileAtomic(path, bytes.NewReader(data), 0o644)
 }
 
 // binary returns the canonical path of the binary an update replaces,
