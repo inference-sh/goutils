@@ -41,7 +41,9 @@ type ClientOptions struct {
 	RecIntvlMax time.Duration
 	// RecIntvlFactor specifies the rate of increase of the reconnection interval
 	RecIntvlFactor float64
-	// KeepAliveTimeout is an interval for sending ping/pong messages
+	// KeepAliveTimeout is how long the connection may go without a pong or
+	// a message from the server before it is closed and redialed. Pings go
+	// out every KeepAliveTimeout/3. 0 disables keepalive.
 	KeepAliveTimeout time.Duration
 }
 
