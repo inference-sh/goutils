@@ -9,7 +9,7 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/gorilla/websocket v1.5.3
 	github.com/gosimple/slug v1.15.0
-	github.com/inference-sh/recws v1.6.6-0.20261028181151-bb45acc9af71
+	github.com/inference-sh/recws v1.6.6-0.20261028205700-ca934857f53c
 	github.com/json-iterator/go v1.1.12
 	github.com/oklog/ulid/v2 v2.1.2
 	github.com/redis/go-redis/v9 v9.23.0
