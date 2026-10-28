@@ -3,7 +3,9 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -12,13 +14,27 @@ import (
 	"github.com/inference-sh/goutils/logging"
 )
 
+// DefaultServerReadTimeout is how long Listen waits for anything from the
+// peer (a message, a ping or a pong) before it closes the connection. It is
+// 3x the slowest heartbeat a healthy client sends: a goutils client pings
+// every ClientOptions.KeepAliveTimeout/3 (20s by default), and recws v1.6.5
+// and older pinged only every KeepAliveTimeout (60s). Engines also send a
+// heartbeat message every 1s and belt remotes every 5s.
+const DefaultServerReadTimeout = 90 * time.Second
+
 // ServerConnection represents a WebSocket server connection
 type ServerConnection struct {
 	BaseConnection
-	ID       string
-	conn     *websocket.Conn
-	sendChan chan *sendOp
-	done     chan struct{}
+	ID string
+	// ReadTimeout is the read deadline Listen keeps on the connection: set
+	// when Listen starts and pushed forward on every message, ping and pong.
+	// A peer that sends nothing for this long, a hung or half-open one among
+	// them, has its socket closed. Defaults to DefaultServerReadTimeout; set
+	// it before Listen. 0 or less disables it.
+	ReadTimeout time.Duration
+	conn        *websocket.Conn
+	sendChan    chan *sendOp
+	done        chan struct{}
 }
 
 // Ensure ServerConnection implements Connection interface
@@ -44,6 +60,7 @@ func NewServerConnection(w http.ResponseWriter, r *http.Request) (*ServerConnect
 	c := &ServerConnection{
 		BaseConnection: NewBaseConnection(r.Context()),
 		ID:             connID,
+		ReadTimeout:    DefaultServerReadTimeout,
 		conn:           conn,
 		sendChan:       make(chan *sendOp),
 		done:           make(chan struct{}),
@@ -107,6 +124,8 @@ func (c *ServerConnection) Listen(ctx context.Context) {
 	// Start message processor
 	go c.BaseConnection.processMessages()
 
+	c.keepReadDeadline()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -123,11 +142,45 @@ func (c *ServerConnection) Listen(ctx context.Context) {
 				logging.Error("ws").Msgf("Error reading message conn_id=%s: %v", c.ID, err)
 				return
 			}
+			c.extendReadDeadline()
 
 			if !c.enqueue(ctx, c.done, msg) {
 				return
 			}
 		}
+	}
+}
+
+// keepReadDeadline sets the first read deadline and has every ping and pong
+// push it forward. Pings are still answered with a pong, as gorilla's
+// default handler does.
+func (c *ServerConnection) keepReadDeadline() {
+	if c.ReadTimeout <= 0 {
+		return
+	}
+	c.extendReadDeadline()
+	c.conn.SetPingHandler(func(appData string) error {
+		c.extendReadDeadline()
+		err := c.conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
+		if err == websocket.ErrCloseSent {
+			return nil
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return nil
+		}
+		return err
+	})
+	c.conn.SetPongHandler(func(string) error {
+		c.extendReadDeadline()
+		return nil
+	})
+}
+
+// extendReadDeadline pushes the read deadline ReadTimeout past now.
+func (c *ServerConnection) extendReadDeadline() {
+	if c.ReadTimeout > 0 {
+		c.conn.SetReadDeadline(time.Now().Add(c.ReadTimeout))
 	}
 }
 
