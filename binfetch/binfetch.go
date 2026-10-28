@@ -80,26 +80,30 @@ func DownloadAndInstallBinary(ctx context.Context, opts BinFetchOptions) error {
 	}
 
 	// Stage under a unique name: a fixed "<dest>.new" lets two concurrent
-	// updaters clobber each other's staging file mid-swap.
+	// updaters clobber each other's staging file mid-swap. The staging file
+	// is new (O_EXCL), so it is owned by whoever runs the update, never by
+	// an earlier binary's owner: a root service that updates itself is left
+	// with a root-owned binary. It is written through the descriptor
+	// CreateTemp opened, and its mode set there, before the rename: the
+	// binary is never in place with another mode, and nothing reopens it by
+	// name.
 	staging, err := os.CreateTemp(filepath.Dir(opts.DestPath), "."+filepath.Base(opts.DestPath)+".new-*")
 	if err != nil {
 		return fmt.Errorf("create staging file: %w", err)
 	}
 	stagingPath := staging.Name()
-	staging.Close()
 	defer os.Remove(stagingPath) // no-op once the rename succeeds
 
-	if err := extractSingleBinary(tmpFile, opts.URL, stagingPath, opts.Windows); err != nil {
+	err = extractSingleBinary(tmpFile, opts.URL, staging, opts.Windows)
+	if cerr := staging.Close(); err == nil && cerr != nil {
+		err = fmt.Errorf("close staging file: %w", cerr)
+	}
+	if err != nil {
 		return err
 	}
 
 	if err := swapIntoPlace(stagingPath, opts.DestPath, opts.Windows); err != nil {
 		return err
-	}
-	if !opts.Windows {
-		if err := os.Chmod(opts.DestPath, 0o755); err != nil {
-			return fmt.Errorf("chmod binary: %w", err)
-		}
 	}
 
 	if !opts.Windows {
@@ -155,6 +159,11 @@ func ensureAliases(destPath string, aliases []string) error {
 		if alias == "" || alias == target {
 			continue
 		}
+		// An alias is a file name beside the binary: one from a manifest
+		// must not reach another directory (an update may run as root).
+		if !plainName(alias) {
+			return fmt.Errorf("alias %q is not a plain file name", alias)
+		}
 		linkPath := filepath.Join(dir, alias)
 		// Best-effort cleanup of any existing entry. Skip if it's already
 		// a symlink pointing at the right place.
@@ -169,6 +178,22 @@ func ensureAliases(destPath string, aliases []string) error {
 		}
 	}
 	return nil
+}
+
+// plainName reports whether name is a file name of letters, digits, '.',
+// '_' and '-', not starting with '.': no separator, no "..".
+func plainName(name string) bool {
+	if name == "" || name[0] == '.' {
+		return false
+	}
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // downloadArchive fetches url to a temp file and verifies SHA256 (when provided).
@@ -225,14 +250,14 @@ func downloadArchive(ctx context.Context, url, expectedSHA256 string, client *ht
 	return tmpFile, nil
 }
 
-// extractSingleBinary extracts the first regular file from the archive into destPath.
+// extractSingleBinary extracts the first regular file from the archive into dest.
 // This matches the existing launcher semantics: one-file-per-archive, drop the rest.
-func extractSingleBinary(archive *os.File, sourceURL, destPath string, windows bool) error {
+func extractSingleBinary(archive *os.File, sourceURL string, dest *os.File, windows bool) error {
 	switch archiveSuffix(sourceURL) {
 	case ".zip":
-		return extractZipFirstFile(archive, destPath, windows)
+		return extractZipFirstFile(archive, dest, windows)
 	case ".tar.gz", ".tgz":
-		return extractTarGzFirstFile(archive, destPath, windows)
+		return extractTarGzFirstFile(archive, dest, windows)
 	default:
 		return fmt.Errorf("unsupported archive format for %s", sourceURL)
 	}
@@ -251,7 +276,7 @@ func archiveSuffix(url string) string {
 	}
 }
 
-func extractTarGzFirstFile(src *os.File, destPath string, windows bool) error {
+func extractTarGzFirstFile(src *os.File, dest *os.File, windows bool) error {
 	gzr, err := gzip.NewReader(src)
 	if err != nil {
 		return fmt.Errorf("gzip reader: %w", err)
@@ -270,11 +295,11 @@ func extractTarGzFirstFile(src *os.File, destPath string, windows bool) error {
 		if header.Typeflag != tar.TypeReg {
 			continue
 		}
-		return writeBinary(tr, destPath, windows)
+		return writeBinary(tr, dest, windows)
 	}
 }
 
-func extractZipFirstFile(src *os.File, destPath string, windows bool) error {
+func extractZipFirstFile(src *os.File, dest *os.File, windows bool) error {
 	info, err := src.Stat()
 	if err != nil {
 		return fmt.Errorf("stat: %w", err)
@@ -291,29 +316,26 @@ func extractZipFirstFile(src *os.File, destPath string, windows bool) error {
 		if err != nil {
 			return fmt.Errorf("open zip entry: %w", err)
 		}
-		err = writeBinary(rc, destPath, windows)
+		err = writeBinary(rc, dest, windows)
 		rc.Close()
 		return err
 	}
 	return fmt.Errorf("no regular file found in archive")
 }
 
-func writeBinary(r io.Reader, destPath string, windows bool) error {
-	out, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
-	if err != nil {
-		return fmt.Errorf("create dest: %w", err)
-	}
+// writeBinary writes r into out, 0755 unless windows, and syncs it.
+func writeBinary(r io.Reader, out *os.File, windows bool) error {
 	if _, err := io.Copy(out, r); err != nil {
-		out.Close()
 		return fmt.Errorf("write dest: %w", err)
 	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("close dest: %w", err)
-	}
 	if !windows {
-		if err := os.Chmod(destPath, 0o755); err != nil {
+		// On the descriptor: CreateTemp made it 0600.
+		if err := out.Chmod(0o755); err != nil {
 			return fmt.Errorf("chmod: %w", err)
 		}
+	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("sync dest: %w", err)
 	}
 	return nil
 }

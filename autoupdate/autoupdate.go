@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -412,13 +413,25 @@ func stateFile(cfg Config) string {
 }
 
 // readState loads the state file. Missing or corrupt state returns nil, nil
-// so callers treat it as "no prior check".
+// so callers treat it as "no prior check". So does a state file another
+// user could have written (not owned by this process's user, or writable
+// by its group or by everyone): a cached state names the download and
+// its checksum, and is installed without a manifest read, so whoever can
+// write it picks the binary this process, perhaps root, runs next.
 func readState(path string) (*state, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || !ownFile(fi) {
+		return nil, nil
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
 		return nil, err
 	}
 	var s state
@@ -438,7 +451,24 @@ func writeState(path string, s *state) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// A new file renamed over the old: a link planted at path is replaced,
+	// not followed, and the file is this process's user's.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name()) // no-op once renamed
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Chmod(0o644)
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // binary returns the canonical path of the binary an update replaces,
