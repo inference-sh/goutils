@@ -9,7 +9,11 @@
 // No shape may span a quote, so a JSON document stays a JSON document.
 package secretshape
 
-import "regexp"
+import (
+	"regexp"
+
+	"github.com/inference-sh/goutils/internal/escmask"
+)
 
 // Placeholder is what Redact puts in place of a match by default.
 const Placeholder = "[REDACTED]"
@@ -34,18 +38,19 @@ var Bearer = regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?(?:bearer
 
 // Redact replaces every match in text with placeholder (Placeholder when
 // empty) and reports how many it replaced. Text with no match is returned
-// as is.
+// as is. A value right after a backslash escape (serialized JSON's
+// "\ninfrt-…") is found too: the escape is never part of the match.
 func Redact(text, placeholder string) (string, int) {
 	if placeholder == "" {
 		placeholder = Placeholder
 	}
 	n := 0
 	for _, re := range Shapes {
-		text = re.ReplaceAllStringFunc(text, func(string) string { n++; return placeholder })
+		text = escmask.ReplaceAll(re, text, func(string, []int) string { n++; return placeholder })
 	}
-	text = Bearer.ReplaceAllStringFunc(text, func(m string) string {
+	text = escmask.ReplaceAll(Bearer, text, func(s string, loc []int) string {
 		n++
-		return Bearer.ReplaceAllString(m, "${1}"+placeholder)
+		return s[loc[2]:loc[3]] + placeholder
 	})
 	return text, n
 }

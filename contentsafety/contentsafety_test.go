@@ -291,3 +291,18 @@ func patternSample(expr string) (string, bool) {
 	}
 	return b.String(), b.Len() > 0
 }
+
+// A key right after a backslash escape in serialized text ("\n1nfsh-…" in
+// NDJSON) is still a key: the escape's letter must not hide the boundary.
+func TestClean_credentialAfterJSONEscape(t *testing.T) {
+	key := "1nfsh-" + strings.Repeat("a", 26)
+	in := `{"text":"line\n` + key + `"}` + "\n" + `{"text":"tab\t` + key + `"}`
+	out, findings := Clean(in, Credentials)
+	want := `{"text":"line\n` + redactedCredential + `"}` + "\n" + `{"text":"tab\t` + redactedCredential + `"}`
+	if out != want || len(findings) != 2 {
+		t.Errorf("got %s (%d findings), want %s", out, len(findings), want)
+	}
+	if r := Detect(`{"text":"line\n`+key+`"}`, Credentials); len(r.Findings) == 0 {
+		t.Errorf("Detect missed the key after \\n")
+	}
+}

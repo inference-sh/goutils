@@ -53,3 +53,27 @@ func TestRedact_customPlaceholder(t *testing.T) {
 		t.Errorf("got %q", out)
 	}
 }
+
+// In serialized JSON or NDJSON a value after a newline is written "\ninfrt-…":
+// the escape's letter is a word character, so \b alone would see no boundary.
+func TestRedact_afterJSONEscape(t *testing.T) {
+	tok := "infrt-" + strings.Repeat("i", 20)
+	for _, esc := range []string{"\\n", "\\t", "\\r", "\\u0020"} {
+		in := `{"text":"line` + esc + tok + `"}`
+		out, n := Redact(in, "")
+		want := `{"text":"line` + esc + Placeholder + `"}`
+		if n != 1 || out != want {
+			t.Errorf("%s: got %s (%d), want %s", esc, out, n, want)
+		}
+	}
+	// An escaped backslash then the letter n is text: "\\nsk-…" decodes to
+	// \nsk-…, a word, and stays.
+	in := `{"a":"\\nsk-` + strings.Repeat("a", 30) + `"}`
+	if out, n := Redact(in, ""); n != 0 || out != in {
+		t.Errorf("escaped backslash: got %s (%d)", out, n)
+	}
+	in = `{"h":"x\nAuthorization: Bearer ` + strings.Repeat("t", 32) + `"}`
+	if out, n := Redact(in, ""); n != 1 || out != `{"h":"x\nAuthorization: Bearer `+Placeholder+`"}` {
+		t.Errorf("bearer after escape: got %s (%d)", out, n)
+	}
+}

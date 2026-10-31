@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/inference-sh/goutils/internal/escmask"
 )
 
 // ScanSeverity levels.
@@ -467,7 +469,7 @@ func scanLines(result *ScanResult, r *rule, pattern *regexp.Regexp, filePath str
 		if seen[key] {
 			continue
 		}
-		if loc := pattern.FindStringIndex(line); loc != nil {
+		if loc := escmask.FindIndex(pattern, line); loc != nil {
 			seen[key] = true
 			result.Findings = append(result.Findings, ScanFinding{
 				RuleID:      r.ID,

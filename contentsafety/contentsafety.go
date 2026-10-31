@@ -22,6 +22,8 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	"github.com/inference-sh/goutils/internal/escmask"
 )
 
 // RuleSet selects which families of rules to apply. Values are bit flags, so a
@@ -161,12 +163,12 @@ func Clean(content string, sets RuleSet) (string, []Finding) {
 }
 
 func replaceReporting(content string, pattern *regexp.Regexp, r *rule, findings *[]Finding) string {
-	return pattern.ReplaceAllStringFunc(content, func(match string) string {
+	return escmask.ReplaceAll(pattern, content, func(s string, loc []int) string {
 		*findings = append(*findings, Finding{
 			RuleID:      r.ID,
 			Severity:    r.Severity,
 			Description: r.Description,
-			Match:       truncateMatch(match),
+			Match:       truncateMatch(s[loc[0]:loc[1]]),
 		})
 		return r.Placeholder
 	})
