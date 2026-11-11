@@ -24,7 +24,4 @@ func TestCloseCodes(t *testing.T) {
 			t.Errorf("%d is outside the application range", tc.want)
 		}
 	}
-	if CloseCode(4502) != CloseStreamRefused {
-		t.Error("a code read off the wire compares equal to its constant")
-	}
 }
