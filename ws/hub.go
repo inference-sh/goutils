@@ -3,12 +3,18 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/inference-sh/goutils/logging"
 )
+
+// ErrConnectionNotFound is SendToConnection's error when no instance holds
+// the connection: callers tell an absent connection apart from a failed
+// send with errors.Is.
+var ErrConnectionNotFound = errors.New("connection not found")
 
 // Hub manages all active WebSocket server connections
 type Hub struct {
@@ -276,8 +282,11 @@ func (h *Hub) SendToConnection(id string, msgType string, data any) error {
 	case ConnectionRemote:
 		// If not local and we have pubsub, try to find it on other instances
 		instanceID, err := h.connectionStore.Find(id)
-		if err != nil || instanceID == nil {
+		if err != nil {
 			return fmt.Errorf("failed to find connection: %w", err)
+		}
+		if instanceID == nil {
+			return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
 		}
 
 		// Marshal the data
@@ -295,11 +304,10 @@ func (h *Hub) SendToConnection(id string, msgType string, data any) error {
 			return fmt.Errorf("failed to forward message: %w", err)
 		}
 		return nil
-	case ConnectionNotFound:
-		return fmt.Errorf("connection not found: %s", id)
 	}
-
-	return fmt.Errorf("connection not found: %s", id)
+	// ConnectionNotFound, or a local connection that went since the
+	// state was read.
+	return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
 }
 
 // BroadcastToChannel sends a message to all connections subscribed to a channel
