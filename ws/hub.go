@@ -270,44 +270,44 @@ func (h *Hub) CanSendMessage(id string) bool {
 	return false
 }
 
-// SendToConnection sends a message to a specific connection
+// SendToConnection sends a message to a specific connection, held here or
+// by another instance. A connection no instance holds (or one closing here)
+// is ErrConnectionNotFound; a failed lookup in the store is its own error,
+// not ErrConnectionNotFound. A message forwarded to another instance is
+// published to it: one that lost the connection since drops it, unreported.
 func (h *Hub) SendToConnection(id string, msgType string, data any) error {
-	state := h.GetConnectionState(id)
-
-	switch state {
-	case ConnectionLocal:
-		if conn, ok := h.GetConnection(id); ok {
-			return conn.Send(msgType, data)
-		}
-	case ConnectionRemote:
-		// If not local and we have pubsub, try to find it on other instances
-		instanceID, err := h.connectionStore.Find(id)
-		if err != nil {
-			return fmt.Errorf("failed to find connection: %w", err)
-		}
-		if instanceID == nil {
-			return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
-		}
-
-		// Marshal the data
-		var dataBytes []byte
-		if data != nil {
-			var err error
-			dataBytes, err = json.Marshal(data)
-			if err != nil {
-				return fmt.Errorf("failed to marshal message data: %w", err)
+	if c, ok := h.connections.Load(id); ok {
+		if conn, ok := c.(*ServerConnection); ok {
+			err := conn.Send(msgType, data)
+			if errors.Is(err, ErrNotConnected) {
+				return fmt.Errorf("%w: %s: %w", ErrConnectionNotFound, id, err)
 			}
+			return err
 		}
-
-		// Forward the message to the correct instance
-		if err := h.connectionStore.SendToInstance(*instanceID, id, msgType, dataBytes); err != nil {
-			return fmt.Errorf("failed to forward message: %w", err)
-		}
-		return nil
 	}
-	// ConnectionNotFound, or a local connection that went since the
-	// state was read.
-	return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
+	if h.connectionStore == nil {
+		return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
+	}
+	instanceID, err := h.connectionStore.Find(id)
+	if err != nil {
+		return fmt.Errorf("failed to find connection: %w", err)
+	}
+	// Nobody holds it, or the lease names this instance though the
+	// connection is gone from it (its lease has not lapsed yet).
+	if instanceID == nil || *instanceID == h.instanceID {
+		return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
+	}
+	var dataBytes []byte
+	if data != nil {
+		dataBytes, err = json.Marshal(data)
+		if err != nil {
+			return fmt.Errorf("failed to marshal message data: %w", err)
+		}
+	}
+	if err := h.connectionStore.SendToInstance(*instanceID, id, msgType, dataBytes); err != nil {
+		return fmt.Errorf("failed to forward message: %w", err)
+	}
+	return nil
 }
 
 // BroadcastToChannel sends a message to all connections subscribed to a channel
