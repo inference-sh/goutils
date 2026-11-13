@@ -96,16 +96,20 @@ func (h *Hub) startTTLRefresh() {
 	}()
 }
 
-// Register adds a server connection to the hub with an identifier
+// Register adds a server connection to the hub with an identifier. A
+// different connection already registered under id is closed: the hub no
+// longer routes to it, and left open its peer's pings would keep it, its
+// goroutines and its buffers alive for as long as the peer cared to.
 func (h *Hub) Register(id string, conn *ServerConnection) {
-	if prev, loaded := h.connections.Load(id); loaded {
-		if sc, ok := prev.(*ServerConnection); ok {
-			logging.Info("ws").Msgf("Replacing connection for %s: old_conn=%s new_conn=%s", id, sc.ID, conn.ID)
-		}
-	} else {
+	// Stored before the old one is closed, so the old connection's own
+	// Unregister(id, old) finds it replaced and leaves the new one alone.
+	prev, loaded := h.connections.Swap(id, conn)
+	if sc, ok := prev.(*ServerConnection); loaded && ok && sc != conn {
+		logging.Info("ws").Msgf("Replacing connection for %s: old_conn=%s new_conn=%s", id, sc.ID, conn.ID)
+		_ = sc.Close()
+	} else if !loaded {
 		logging.Info("ws").Msgf("Registering connection for %s: conn_id=%s", id, conn.ID)
 	}
-	h.connections.Store(id, conn)
 	h.ttlMu.Lock()
 	h.ttlKeys[id] = struct{}{}
 	h.ttlMu.Unlock()
