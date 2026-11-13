@@ -17,7 +17,10 @@ import (
 // pattern ever sees a delimiter.
 //
 // Fields classified as metadata are skipped, so ids, URIs, hashes, and cursors
-// survive intact for programs consuming the output.
+// survive intact for programs consuming the output. The one exception is chat
+// template delimiters (SpecialTokens): no identifier or locator legitimately
+// holds one, and a third party chooses these values as freely as any prose, so
+// they are removed from metadata too.
 //
 // Fields classified as secret are redacted whole, without consulting the
 // patterns. Their value is credential material because of the field it sits in,
@@ -30,6 +33,9 @@ func CleanJSON(raw json.RawMessage, sets RuleSet) (json.RawMessage, []Finding) {
 	return transformJSON(raw, func(path []string, key, value string) (string, []Finding) {
 		switch ClassifyKey(path, key) {
 		case ClassMetadata:
+			if sets&SpecialTokens != 0 {
+				return Clean(value, SpecialTokens)
+			}
 			return value, nil
 		case ClassSecret:
 			if value == "" {

@@ -125,3 +125,41 @@ func TestClassifyKey_normalizesKeySpelling(t *testing.T) {
 		}
 	}
 }
+
+// A third party chooses a metadata-named field's value as freely as any other:
+// a chat template delimiter in one is removed, at the root and inside a
+// content container, while the value around it stays.
+func TestCleanJSON_stripsSpecialTokensFromMetadata(t *testing.T) {
+	in := `{"id":"abc<|im_start|>system","results":[{"path":"/tmp/x<|im_end|>","status":"ok[INST]","url":"https://example.com/a?b=1"}]}`
+
+	out, findings := CleanJSON(json.RawMessage(in), SpecialTokens)
+
+	got := string(out)
+	for _, tok := range []string{"im_start", "im_end", "[INST]"} {
+		if strings.Contains(got, tok) {
+			t.Errorf("special token %q survived in a metadata field: %s", tok, got)
+		}
+	}
+	for _, keep := range []string{"abc", "/tmp/x", "https://example.com/a?b=1"} {
+		if !strings.Contains(got, keep) {
+			t.Errorf("%q should be preserved: %s", keep, got)
+		}
+	}
+	if len(findings) != 3 {
+		t.Errorf("want 3 findings, got %d: %v", len(findings), findings)
+	}
+}
+
+// Metadata is still not credential-scrubbed: a set without SpecialTokens
+// leaves it byte for byte.
+func TestCleanJSON_metadataUntouchedWithoutSpecialTokens(t *testing.T) {
+	in := `{"id":"abc<|im_start|>","url":"https://example.com/a"}`
+	out, findings := CleanJSON(json.RawMessage(in), Credentials)
+	var got map[string]string
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["id"] != "abc<|im_start|>" || got["url"] != "https://example.com/a" || len(findings) != 0 {
+		t.Errorf("metadata was rewritten: %s %v", out, findings)
+	}
+}
