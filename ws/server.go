@@ -23,6 +23,16 @@ import (
 // heartbeat message every 1s and belt remotes every 5s.
 const DefaultServerReadTimeout = 90 * time.Second
 
+// DefaultServerReadLimit is the largest message Listen accepts from a peer
+// unless ReadLimit says otherwise. gorilla has no limit of its own, so one
+// message of any size was read into memory and decoded before any handler
+// or backpressure saw it. The default is sized to the largest message a
+// healthy peer sends, not to what a route needs: an engine forwards a task's
+// output as base64 inside JSON, and its worker link takes output frames up
+// to 256 MB, which is about 342 MB on this socket. A route whose peers send
+// less (belt remotes, for one) should set ReadLimit well below this.
+const DefaultServerReadLimit int64 = 512 << 20
+
 // ServerConnection represents a WebSocket server connection
 type ServerConnection struct {
 	BaseConnection
@@ -33,10 +43,15 @@ type ServerConnection struct {
 	// them, has its socket closed. Defaults to DefaultServerReadTimeout; set
 	// it before Listen. 0 or less disables it.
 	ReadTimeout time.Duration
-	conn        *websocket.Conn
-	sendChan    chan *sendOp
-	done        chan struct{}
-	closeOnce   sync.Once
+	// ReadLimit is the largest message, in bytes, Listen accepts. A larger
+	// one closes the connection (close code 1009) before it is buffered.
+	// Defaults to DefaultServerReadLimit; set it before Listen. 0 or less
+	// leaves the connection without a limit.
+	ReadLimit int64
+	conn      *websocket.Conn
+	sendChan  chan *sendOp
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // Ensure ServerConnection implements Connection interface
@@ -75,6 +90,7 @@ func NewServerConnectionCheckOrigin(w http.ResponseWriter, r *http.Request, chec
 		BaseConnection: NewBaseConnection(r.Context()),
 		ID:             connID,
 		ReadTimeout:    DefaultServerReadTimeout,
+		ReadLimit:      DefaultServerReadLimit,
 		conn:           conn,
 		sendChan:       make(chan *sendOp),
 		done:           make(chan struct{}),
@@ -139,6 +155,9 @@ func (c *ServerConnection) Listen(ctx context.Context) {
 	go c.BaseConnection.processMessages()
 
 	c.keepReadDeadline()
+	if c.ReadLimit > 0 {
+		c.conn.SetReadLimit(c.ReadLimit)
+	}
 
 	for {
 		select {
