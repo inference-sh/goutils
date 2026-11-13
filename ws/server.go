@@ -33,6 +33,12 @@ const DefaultServerReadTimeout = 90 * time.Second
 // less (belt remotes, for one) should set ReadLimit well below this.
 const DefaultServerReadLimit int64 = 512 << 20
 
+// DefaultServerWriteTimeout is how long one Send may wait on a peer that is
+// not reading before the connection is closed. A healthy peer drains its
+// socket in milliseconds; the write only waits once the peer's receive
+// window and the kernel's send buffer are both full.
+const DefaultServerWriteTimeout = 30 * time.Second
+
 // ServerConnection represents a WebSocket server connection
 type ServerConnection struct {
 	BaseConnection
@@ -48,10 +54,19 @@ type ServerConnection struct {
 	// Defaults to DefaultServerReadLimit; set it before Listen. 0 or less
 	// leaves the connection without a limit.
 	ReadLimit int64
-	conn      *websocket.Conn
-	sendChan  chan *sendOp
-	done      chan struct{}
-	closeOnce sync.Once
+	// WriteTimeout is the write deadline of each Send. A peer that stops
+	// reading (it can keep the read deadline alive with pings) would
+	// otherwise hold Send, and with it every caller that sends to several
+	// connections in turn: a hub's broadcasts and its delivery of messages
+	// forwarded from other instances. When a write times out Send returns
+	// the error and the connection is closed, so later Sends fail at once
+	// with ErrNotConnected. Defaults to DefaultServerWriteTimeout; set it
+	// before the connection is registered or sent to. 0 or less disables it.
+	WriteTimeout time.Duration
+	conn         *websocket.Conn
+	sendChan     chan *sendOp
+	done         chan struct{}
+	closeOnce    sync.Once
 }
 
 // Ensure ServerConnection implements Connection interface
@@ -91,6 +106,7 @@ func NewServerConnectionCheckOrigin(w http.ResponseWriter, r *http.Request, chec
 		ID:             connID,
 		ReadTimeout:    DefaultServerReadTimeout,
 		ReadLimit:      DefaultServerReadLimit,
+		WriteTimeout:   DefaultServerWriteTimeout,
 		conn:           conn,
 		sendChan:       make(chan *sendOp),
 		done:           make(chan struct{}),
@@ -141,7 +157,20 @@ func (c *ServerConnection) sendLoop() {
 				msg.Data = jsonData
 			}
 
-			op.done <- c.conn.WriteJSON(msg)
+			if c.WriteTimeout > 0 {
+				c.conn.SetWriteDeadline(time.Now().Add(c.WriteTimeout))
+			}
+			err := c.conn.WriteJSON(msg)
+			op.done <- err
+			// A write that timed out leaves a partial frame on the wire and
+			// gorilla fails every write after it: the connection is over.
+			// Closing it also ends Listen, so the owner unregisters it.
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				logging.Error("ws").Msgf("Write timed out after %s, closing conn_id=%s", c.WriteTimeout, c.ID)
+				c.Close()
+				return
+			}
 		}
 	}
 }
