@@ -89,8 +89,11 @@ var secretKeys = map[string]bool{
 	"secret": true, "secrets": true, "client_secret": true,
 	"password": true, "passwd": true, "pwd": true, "passcode": true,
 	"token": true, "access_token": true, "refresh_token": true,
-	"id_token": true, "session_token": true, "bearer": true,
-	"api_key": true, "private_key": true, "secret_key": true,
+	"id_token": true, "session_token": true, "bearer": true, "bearer_token": true,
+	// apikey is also what APIKey normalizes to: normalizeKey splits on a
+	// lower-to-upper boundary only, so an acronym runs into the next word.
+	"api_key": true, "apikey": true, "x_api_key": true,
+	"private_key": true, "secret_key": true,
 	"credential": true, "credentials": true, "authorization": true,
 	"cookie": true, "set_cookie": true,
 	// A masked value still exposes its last four characters, which is enough to

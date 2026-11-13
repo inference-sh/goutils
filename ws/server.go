@@ -42,14 +42,26 @@ type ServerConnection struct {
 // Ensure ServerConnection implements Connection interface
 var _ Connection = (*ServerConnection)(nil)
 
-// NewServerConnection creates a new WebSocket connection from an HTTP upgrade
+// NewServerConnection creates a new WebSocket connection from an HTTP upgrade.
+//
+// It accepts the upgrade whatever the request's Origin header says. That is
+// only safe on a route no browser credential authenticates: a browser
+// attaches cookies to a WebSocket handshake a page on another origin starts,
+// so a cookie-authenticated route must use NewServerConnectionCheckOrigin.
 func NewServerConnection(w http.ResponseWriter, r *http.Request) (*ServerConnection, error) {
+	return NewServerConnectionCheckOrigin(w, r, func(*http.Request) bool { return true })
+}
+
+// NewServerConnectionCheckOrigin is NewServerConnection with the handshake
+// refused (403) when checkOrigin returns false. A nil checkOrigin accepts a
+// request with no Origin header, which is every client that is not a
+// browser, and one whose Origin's host is the request's Host; it refuses any
+// other origin.
+func NewServerConnectionCheckOrigin(w http.ResponseWriter, r *http.Request, checkOrigin func(r *http.Request) bool) (*ServerConnection, error) {
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  32768,
 		WriteBufferSize: 32768,
-		CheckOrigin: func(r *http.Request) bool {
-			return true // Override this in production
-		},
+		CheckOrigin:     checkOrigin,
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)

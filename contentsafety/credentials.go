@@ -39,6 +39,18 @@ func credentialRules() []rule {
 			Patterns: compilePatterns(`\b[0-9a-hjkmnp-tv-z]{52}\b`),
 		},
 		{
+			ID:          "INF-CRED-006",
+			Severity:    SeverityCritical,
+			Description: "inference.sh session token in a bearer credential",
+			Sets:        Credentials,
+			Verbs:       DetectOnly | CleanSafe,
+			Placeholder: redactedCredential,
+			// The INF-CRED-002 shape where the text itself says it is a
+			// credential: after "Bearer". That context is what the bare shape
+			// lacks, so this one may rewrite.
+			Patterns: compilePatterns(`(?i)\bbearer\s+[0-9a-hjkmnp-tv-z]{52}\b`),
+		},
+		{
 			ID:          "INF-CRED-003",
 			Severity:    SeverityCritical,
 			Description: "Third-party provider credential",

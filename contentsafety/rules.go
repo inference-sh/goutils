@@ -185,7 +185,7 @@ var allRules = sync.OnceValue(func() []rule {
 				// Data URIs with executable content
 				`(?i)data:(text/html|application/javascript|text/javascript)[;,]`,
 				// PEM private keys
-				`-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----`,
+				`-----BEGIN\s+(?:[A-Z0-9]+\s+)*PRIVATE\s+KEY(?:\s+BLOCK)?-----`,
 			),
 		},
 		{
@@ -529,9 +529,10 @@ var redactionPatterns = sync.OnceValue(func() []*regexp.Regexp {
 		`\bv1\.0-[a-f0-9]{24}-[a-f0-9]{146}\b`,                // Cloudflare origin CA
 		`\b[0-9]{5,16}:A[a-zA-Z0-9_\-]{34}\b`,                 // Telegram bot
 		// Structural patterns
-		`-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----[\s\S]*?-----END`, // PEM private keys
-		`(?i)(postgres|mysql|mongodb|redis)://[^:]+:[^@\s]+@[^\s]+`,  // Connection strings
-		`(?i)aws_secret_access_key\s*[:=]\s*\S{30,}`,                 // AWS secret key
+		// PEM private keys: PKCS#8, RSA, EC, DSA, OPENSSH, ENCRYPTED, PGP block
+		`-----BEGIN\s+(?:[A-Z0-9]+\s+)*PRIVATE\s+KEY(?:\s+BLOCK)?-----[\s\S]*?-----END`,
+		`(?i)(postgres|mysql|mongodb|redis)://[^:]+:[^@\s]+@[^\s]+`, // Connection strings
+		`(?i)aws_secret_access_key\s*[:=]\s*\S{30,}`,                // AWS secret key
 	)
 })
 
