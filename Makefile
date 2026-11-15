@@ -1,4 +1,4 @@
-.PHONY: release release-patch release-minor release-major test
+.PHONY: release release-patch release-minor release-major test manifest-keygen
 
 BUMP ?= patch
 
@@ -27,6 +27,17 @@ endif
 
 test:
 	GOWORK=off go build ./... && go test ./...
+
+# manifest-keygen makes the release manifest signing key pair (see
+# cmd/manifestsig). The private key goes to stdout, so pipe it straight into
+# the secret store and it never touches disk:
+#
+#   make -s manifest-keygen | gh secret set RELEASE_MANIFEST_SIGNING_KEY --org inference-sh --repos cli,engine
+#
+# The public key is printed on stderr as the Go line to paste into each
+# binary's trusted key list.
+manifest-keygen:
+	@GOWORK=off go run ./cmd/manifestsig keygen
 
 # release tags and publishes. That is the whole job; dependabot takes it
 # from there in each consumer.
