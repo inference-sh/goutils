@@ -280,3 +280,32 @@ func TestKeySet_BadResponseKeepsKeys(t *testing.T) {
 		t.Fatalf("a failed fetch dropped keys: %d", set.Len())
 	}
 }
+
+func TestIssuer(t *testing.T) {
+	keys := mustDerive(t, secretA)
+	grant := Grant{Socket: "socket_1", Role: RoleClient, Relay: relayURL}
+	alg := func(i Issuer) string {
+		t.Helper()
+		raw, err := i.Issue(grant, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok, _, err := jwt.NewParser().ParseUnverified(raw, &claims{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok.Method.Alg()
+	}
+	if got := alg(Issuer{LegacyHS256: testKeys}); got != "HS256" {
+		t.Errorf("legacy issuer signed %s", got)
+	}
+	if got := alg(Issuer{Signing: keys, LegacyHS256: testKeys}); got != "EdDSA" {
+		t.Errorf("EdDSA issuer signed %s", got)
+	}
+	if (Issuer{}).Ready() {
+		t.Error("an issuer without keys is ready")
+	}
+	if _, err := (Issuer{}).Issue(grant, time.Minute); err == nil {
+		t.Error("issued without keys")
+	}
+}

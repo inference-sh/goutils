@@ -355,3 +355,22 @@ func (v Verifier) keyfunc(t *jwt.Token) (any, error) {
 	}
 	return nil, fmt.Errorf("unexpected method %s", t.Method.Alg())
 }
+
+// Issuer is what the API signs socket tokens with: EdDSA with Signing when it
+// is set, else HS256 with LegacyHS256, the format before EdDSA. The API sets
+// Signing once every relay verifies EdDSA; the next release drops HS256.
+type Issuer struct {
+	Signing     SigningKeys
+	LegacyHS256 Keys
+}
+
+// Ready reports whether the issuer has a key to sign with.
+func (i Issuer) Ready() bool { return len(i.Signing) > 0 || len(i.LegacyHS256) > 0 }
+
+// Issue signs a grant that expires after ttl.
+func (i Issuer) Issue(g Grant, ttl time.Duration) (string, error) {
+	if len(i.Signing) > 0 {
+		return i.Signing.Issue(g, ttl)
+	}
+	return Issue(i.LegacyHS256, g, ttl)
+}
