@@ -4,10 +4,12 @@
 //	manifestsig keygen
 //	    Prints a new private key on stdout and, on stderr, the public key as
 //	    the Go line to add to a binary's trusted keys. Pipe stdout straight
-//	    into the secret store so the private key is never written to disk:
+//	    into the secret store so the private key is never written to disk
+//	    (bash; one key for every product, in each repo's release environment):
 //
-//	    go run github.com/inference-sh/goutils/cmd/manifestsig keygen |
-//	        gh secret set RELEASE_MANIFEST_SIGNING_KEY --org inference-sh --repos cli,engine
+//	    go run github.com/inference-sh/goutils/cmd/manifestsig keygen \
+//	      | tee >(gh secret set RELEASE_MANIFEST_SIGNING_KEY --repo inference-sh/cli --env release) \
+//	      | gh secret set RELEASE_MANIFEST_SIGNING_KEY --repo inference-sh/engine --env release
 //
 //	manifestsig sign [-key-env NAME] [-o FILE] manifest.json
 //	    Signs manifest.json with the private key(s) in $NAME (default

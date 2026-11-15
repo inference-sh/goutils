@@ -30,9 +30,11 @@ test:
 
 # manifest-keygen makes the release manifest signing key pair (see
 # cmd/manifestsig). The private key goes to stdout, so pipe it straight into
-# the secret store and it never touches disk:
+# each release repo's "release" environment and it never touches disk:
 #
-#   make -s manifest-keygen | gh secret set RELEASE_MANIFEST_SIGNING_KEY --org inference-sh --repos cli,engine
+#   make -s manifest-keygen \
+#     | tee >(gh secret set RELEASE_MANIFEST_SIGNING_KEY --repo inference-sh/cli --env release) \
+#     | gh secret set RELEASE_MANIFEST_SIGNING_KEY --repo inference-sh/engine --env release
 #
 # The public key is printed on stderr as the Go line to paste into each
 # binary's trusted key list.
