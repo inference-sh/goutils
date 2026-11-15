@@ -6,10 +6,17 @@
 // them and pairs the ends. Issuer and verifier are separate services, so the
 // formats live here, where both can import their one definition.
 //
-// A token is an HS256 JWT signed with a secret only the API and the relays
-// hold. That secret signs nothing else: a relay that leaks it can forge socket
-// tokens and nothing more. The audience is the relay the API chose for the
-// task, so a token is good at that relay only.
+// A socket token is an EdDSA (Ed25519) JWT. Only the API holds the private
+// key (SigningKeys); relays verify with the public keys the API publishes at
+// KeysPath (KeySet), so a relay, or anyone holding what a relay holds, cannot
+// mint a socket token. The kid header names the key by its thumbprint. The
+// audience is the relay the API chose for the task, so a token is good at that
+// relay only.
+//
+// Before EdDSA, socket tokens were HS256 JWTs signed with a secret the API and
+// every relay hold (Keys). Issue and Verify, and Verifier.LegacyHS256, are that
+// format, kept for the release in which relays accept both. The same shared
+// secret still signs the report tokens relays send the API (report.go).
 package sockettoken
 
 import (
@@ -47,8 +54,8 @@ var ErrInvalid = errors.New("invalid socket token")
 // minKeyBytes is the shortest secret accepted: the HS256 output size.
 const minKeyBytes = 32
 
-// Keys is the signing secret and any older secrets still in rotation. The
-// first signs; all verify.
+// Keys is the shared HS256 secret and any older secrets still in rotation.
+// The first signs; all verify.
 type Keys [][]byte
 
 // ParseKeys reads a comma-separated list of secrets, newest first.
@@ -90,16 +97,26 @@ type claims struct {
 	Role Role `json:"role"`
 }
 
-// Issue signs a grant that expires after ttl.
+// Issue signs a grant with the shared HS256 secret (the legacy format; see
+// SigningKeys.Issue).
 func Issue(keys Keys, g Grant, ttl time.Duration) (string, error) {
 	if len(keys) == 0 {
 		return "", errors.New("no socket signing key configured")
 	}
+	t, err := newGrantToken(jwt.SigningMethodHS256, g, ttl)
+	if err != nil {
+		return "", err
+	}
+	return t.SignedString(keys[0])
+}
+
+// newGrantToken is the unsigned token for a grant that expires after ttl.
+func newGrantToken(m jwt.SigningMethod, g Grant, ttl time.Duration) (*jwt.Token, error) {
 	if g.Socket == "" || g.Relay == "" || !g.Role.valid() {
-		return "", fmt.Errorf("incomplete socket grant: %+v", g)
+		return nil, fmt.Errorf("incomplete socket grant: %+v", g)
 	}
 	now := time.Now()
-	t := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
+	return jwt.NewWithClaims(m, claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   g.Socket,
 			Audience:  jwt.ClaimStrings{g.Relay},
@@ -107,23 +124,27 @@ func Issue(keys Keys, g Grant, ttl time.Duration) (string, error) {
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		},
 		Role: g.Role,
-	})
-	return t.SignedString(keys[0])
+	}), nil
 }
 
 // leeway absorbs clock drift between the API host and a relay host.
 const leeway = 5 * time.Second
 
-// Verify checks a token presented at relay and returns the grant it carries.
+// Verify checks an HS256 token (the legacy format) presented at relay and
+// returns the grant it carries. Verifier.Verify also takes EdDSA tokens.
 func Verify(keys Keys, relay, raw string) (Grant, error) {
+	return verifyGrant(relay, raw, []string{jwt.SigningMethodHS256.Alg()}, keys.verification)
+}
+
+func verifyGrant(relay, raw string, methods []string, keyfunc jwt.Keyfunc) (Grant, error) {
 	parser := jwt.NewParser(
-		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithValidMethods(methods),
 		jwt.WithAudience(relay),
 		jwt.WithExpirationRequired(),
 		jwt.WithLeeway(leeway),
 	)
 	var c claims
-	if _, err := parser.ParseWithClaims(raw, &c, keys.verification); err != nil {
+	if _, err := parser.ParseWithClaims(raw, &c, keyfunc); err != nil {
 		return Grant{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
 	if c.Subject == "" || !c.Role.valid() {
