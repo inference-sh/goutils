@@ -13,6 +13,9 @@ import (
 
 // LightManifest represents the update manifest structure
 type LightManifest struct {
+	// Product is the dist directory the manifest belongs to ("cli",
+	// "engine"); a signed manifest must name the one it was fetched from.
+	Product     string                   `json:"product,omitempty"`
 	Version     string                   `json:"version"`
 	ReleaseDate time.Time                `json:"releaseDate"`
 	Builds      map[string]ManifestBuild `json:"builds"`
@@ -39,6 +42,8 @@ type UpdateInfo struct {
 	SHA256           string    `json:"sha256"`
 	UpdateAvailable  bool      `json:"updateAvailable"`
 	Aliases          []string  `json:"aliases,omitempty"`
+	// Signed is true when the manifest's Sigstore bundle was verified.
+	Signed bool `json:"signed,omitempty"`
 }
 
 // IsNewerVersion returns true if available is a higher semver than current.
@@ -57,17 +62,77 @@ func IsNewerVersion(available, current string) bool {
 // hung connection must not hang the CLI.
 var manifestClient = &http.Client{Timeout: 10 * time.Second}
 
-// CheckVersion checks if there's a new version available compared to the provided version
+const (
+	maxManifestSize = 1 << 20
+	maxBundleSize   = 256 << 10
+)
+
+// fetch GETs url. found is false on a 404; any other non-200 is an error.
+func fetch(url string, limit int64) (body []byte, found bool, err error) {
+	resp, err := manifestClient.Get(url)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("%s: %s", url, resp.Status)
+	}
+	body, err = io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if int64(len(body)) > limit {
+		return nil, false, fmt.Errorf("%s: larger than %d bytes", url, limit)
+	}
+	return body, true, nil
+}
+
+// verifyFetched applies the product's signature policy to a manifest
+// fetched from manifestURL. signed reports whether a bundle was verified.
+func verifyFetched(manifestURL string, manifest []byte) (signed bool, err error) {
+	p, ok := Products[ProductFromURL(manifestURL)]
+	if !ok {
+		return false, nil
+	}
+	bundleURL, err := BundleURL(manifestURL)
+	if err != nil {
+		return false, err
+	}
+	b, found, err := fetch(bundleURL, maxBundleSize)
+	if err != nil {
+		return false, fmt.Errorf("failed to get manifest signature: %w", err)
+	}
+	if !found {
+		if p.Required {
+			return false, fmt.Errorf("%w: no %s", ErrUnsigned, bundleURL)
+		}
+		Warnf("release manifest %s is not signed; accepting it until signatures are required", manifestURL)
+		return false, nil
+	}
+	if _, err := VerifyManifest(manifest, b, p); err != nil {
+		return false, fmt.Errorf("%s: %w", manifestURL, err)
+	}
+	return true, nil
+}
+
+// CheckVersion checks if there's a new version available compared to the
+// provided version. A manifest of a product in Products is checked against
+// its Sigstore bundle as the product's rollout switch says.
 func CheckVersion(manifestUrl string, platform string, arch string, currentVersion string) (*UpdateInfo, error) {
-	resp, err := manifestClient.Get(manifestUrl)
+	manifestContent, found, err := fetch(manifestUrl, maxManifestSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get manifest: %w", err)
 	}
-	defer resp.Body.Close()
+	if !found {
+		return nil, fmt.Errorf("failed to get manifest: %s: 404 Not Found", manifestUrl)
+	}
 
-	manifestContent, err := io.ReadAll(resp.Body)
+	signed, err := verifyFetched(manifestUrl, manifestContent)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read manifest: %w", err)
+		return nil, err
 	}
 
 	var manifest LightManifest
@@ -81,6 +146,11 @@ func CheckVersion(manifestUrl string, platform string, arch string, currentVersi
 	if !ok {
 		return nil, fmt.Errorf("no build available for platform: %s", key)
 	}
+	// The signature covers the binary only through its digest; without
+	// one, binfetch would install whatever the URL serves.
+	if signed && build.SHA256 == "" {
+		return nil, fmt.Errorf("%s: %w: build %s has no sha256", manifestUrl, ErrBadSignature, key)
+	}
 
 	updateAvailable := IsNewerVersion(manifest.Version, currentVersion)
 
@@ -92,6 +162,7 @@ func CheckVersion(manifestUrl string, platform string, arch string, currentVersi
 		SHA256:           build.SHA256,
 		UpdateAvailable:  updateAvailable,
 		Aliases:          manifest.Aliases,
+		Signed:           signed,
 	}, nil
 }
 

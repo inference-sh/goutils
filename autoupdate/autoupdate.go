@@ -124,11 +124,23 @@ type state struct {
 	DownloadURL string    `json:"downloadURL,omitempty"`
 	SHA256      string    `json:"sha256,omitempty"`
 	Aliases     []string  `json:"aliases,omitempty"`
+	// Signed records that the manifest the download came from verified.
+	// Where a product requires signatures, a cached download without it
+	// (written before the requirement, or by a binary that didn't check)
+	// is not installed; the manifest is read again.
+	Signed bool `json:"signed,omitempty"`
 	// FailedVersion / FailedAt record the last install attempt that failed,
 	// so a broken update (locked exe, full disk) is retried on a backoff
 	// instead of re-downloading on every command.
 	FailedVersion string    `json:"failedVersion,omitempty"`
 	FailedAt      time.Time `json:"failedAt,omitempty"`
+}
+
+// signatureRequired reports whether manifestURL's product refuses unsigned
+// manifests.
+func signatureRequired(manifestURL string) bool {
+	p, ok := updater.Products[updater.ProductFromURL(manifestURL)]
+	return ok && p.Required
 }
 
 // installRetryBackoff is how long a failed install of a given version is left
@@ -155,13 +167,17 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 	if cfg.CheckInterval > 0 {
 		st, _ := readState(stateFile(cfg))
 		if st != nil && cfg.nowFn().Sub(st.LastCheck) < cfg.CheckInterval {
-			if st.LastVersion != "" && st.DownloadURL != "" && updater.IsNewerVersion(st.LastVersion, cfg.CurrentVersion) {
+			cachedUpdate := st.LastVersion != "" && st.DownloadURL != "" && updater.IsNewerVersion(st.LastVersion, cfg.CurrentVersion)
+			if cachedUpdate && !st.Signed && signatureRequired(cfg.ManifestURL) {
+				// Fall through to the network check below.
+			} else if cachedUpdate {
 				info = &updater.UpdateInfo{
 					UpdateAvailable:  true,
 					AvailableVersion: st.LastVersion,
 					DownloadURL:      st.DownloadURL,
 					SHA256:           st.SHA256,
 					Aliases:          st.Aliases,
+					Signed:           st.Signed,
 				}
 			} else {
 				return &Result{Skipped: true, SkipReason: "within check interval"}, nil
@@ -182,6 +198,7 @@ func CheckAndReexec(ctx context.Context, cfg Config) (*Result, error) {
 			DownloadURL: info.DownloadURL,
 			SHA256:      info.SHA256,
 			Aliases:     info.Aliases,
+			Signed:      info.Signed,
 		}
 		if prev, _ := readState(stateFile(cfg)); prev != nil {
 			next.FailedVersion, next.FailedAt = prev.FailedVersion, prev.FailedAt

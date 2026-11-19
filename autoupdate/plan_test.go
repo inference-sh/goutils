@@ -20,6 +20,13 @@ import (
 // platform key the tests use, and returns the manifest URL.
 func releaseServer(t *testing.T, version string, payload []byte) string {
 	t.Helper()
+	return releaseServerAt(t, "/manifest.json", version, payload)
+}
+
+// releaseServerAt is releaseServer with the manifest at manifestPath, which
+// for "/cli/..." makes it a product the updater checks signatures for.
+func releaseServerAt(t *testing.T, manifestPath, version string, payload []byte) string {
+	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -49,9 +56,9 @@ func releaseServer(t *testing.T, version string, payload []byte) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mux.HandleFunc("/manifest.json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(manifest) })
+	mux.HandleFunc(manifestPath, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(manifest) })
 	mux.HandleFunc("/belt.tar.gz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(archive) })
-	return srv.URL + "/manifest.json"
+	return srv.URL + manifestPath
 }
 
 // planConfig is a Config for a binary at self, checking manifestURL as
