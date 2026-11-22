@@ -2,6 +2,7 @@ package updater
 
 import (
 	_ "embed"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/tuf"
+	"github.com/theupdateframework/go-tuf/v2/metadata"
 	"github.com/theupdateframework/go-tuf/v2/metadata/fetcher"
 )
 
@@ -70,6 +72,12 @@ var trustedMaterial = func() (root.TrustedMaterial, error) {
 	}
 	tr, err := tufTrustedRoot()
 	if err != nil {
+		if trustCached != nil {
+			return trustCached, nil
+		}
+		if !tufErrAllowsEmbedded(err) {
+			return nil, err
+		}
 		tr, err = root.NewTrustedRootFromJSON(embeddedTrustedRoot)
 		if err != nil {
 			return nil, err
@@ -95,4 +103,30 @@ func tufTrustedRoot() (*root.TrustedRoot, error) {
 		return nil, err
 	}
 	return root.GetTrustedRoot(c)
+}
+
+// tufErrAllowsEmbedded reports whether embeddedTrustedRoot may be used after
+// a TUF failure: only when nothing is cached locally and the error is not a
+// metadata integrity failure.
+func tufErrAllowsEmbedded(err error) bool {
+	if tufLocalMetadataCached() {
+		return false
+	}
+	var repoErr *metadata.ErrRepository
+	return !errors.As(err, &repoErr)
+}
+
+func tufLocalMetadataCached() bool {
+	dir := sigstoreCacheDir()
+	if dir == "" {
+		return false
+	}
+	baseURL := tuf.DefaultOptions().RepositoryBaseURL
+	metaDir := filepath.Join(dir, tuf.URLToPath(baseURL))
+	if _, err := os.Stat(filepath.Join(metaDir, "timestamp.json")); err == nil {
+		return true
+	}
+	cfgPath := filepath.Join(dir, tuf.URLToPath(baseURL)+".json")
+	_, err := os.Stat(cfgPath)
+	return err == nil
 }
