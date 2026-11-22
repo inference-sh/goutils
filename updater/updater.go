@@ -15,7 +15,10 @@ import (
 type LightManifest struct {
 	// Product is the dist directory the manifest belongs to ("cli",
 	// "engine"); a signed manifest must name the one it was fetched from.
-	Product     string                   `json:"product,omitempty"`
+	Product string `json:"product,omitempty"`
+	// Channel is the release line it belongs to ("stable", "canary"); a
+	// signed manifest must name one served at the URL it was fetched from.
+	Channel     string                   `json:"channel,omitempty"`
 	Version     string                   `json:"version"`
 	ReleaseDate time.Time                `json:"releaseDate"`
 	Builds      map[string]ManifestBuild `json:"builds"`
@@ -112,7 +115,7 @@ func verifyFetched(manifestURL string, manifest []byte) (signed bool, err error)
 		Warnf("release manifest %s is not signed; accepting it until signatures are required", manifestURL)
 		return false, nil
 	}
-	if _, err := VerifyManifest(manifest, b, p); err != nil {
+	if _, err := VerifyManifest(manifest, b, p, DistPathFromURL(manifestURL)); err != nil {
 		return false, fmt.Errorf("%s: %w", manifestURL, err)
 	}
 	return true, nil

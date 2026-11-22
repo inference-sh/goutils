@@ -16,7 +16,12 @@ import (
 	"github.com/sigstore/sigstore-go/pkg/verify"
 )
 
-const devIdentity = "https://github.com/inference-sh/cli/.github/workflows/release.yml@refs/heads/dev"
+const (
+	cliMain    = "https://github.com/inference-sh/cli/.github/workflows/release.yml@refs/heads/main"
+	cliDev     = "https://github.com/inference-sh/cli/.github/workflows/release.yml@refs/heads/dev"
+	engineMain = "https://github.com/inference-sh/engine/.github/workflows/release.yml@refs/heads/main"
+	engineDev  = "https://github.com/inference-sh/engine/.github/workflows/release.yml@refs/heads/dev"
+)
 
 // fakeSigstore stands in for Sigstore: a virtual CA and log as the trust
 // root, and bundles served as tokens that parseBundle maps to the entities
@@ -68,13 +73,25 @@ func (f *fakeSigstore) sign(identity, issuer string, artifact []byte) []byte {
 	return []byte(tok)
 }
 
+// manifestJSON is a stable v1.2.0 manifest for product ("" leaves the
+// product and channel out, as in a manifest published before signing).
 func manifestJSON(product, url, sha string) []byte {
+	if product == "" {
+		return manifestFor("", "", "v1.2.0", url, sha)
+	}
+	return manifestFor(product, "stable", "v1.2.0", url, sha)
+}
+
+func manifestFor(product, channel, version, url, sha string) []byte {
 	m := map[string]any{
-		"version": "v1.2.0",
+		"version": version,
 		"builds":  map[string]any{"linux-amd64": map[string]string{"url": url, "sha256": sha}},
 	}
 	if product != "" {
 		m["product"] = product
+	}
+	if channel != "" {
+		m["channel"] = channel
 	}
 	b, _ := json.Marshal(m)
 	return b
@@ -125,8 +142,13 @@ func TestRolloutSwitchesStartOff(t *testing.T) {
 		t.Fatal("a product requires signatures; update this test with the rollout")
 	}
 	for name, p := range Products {
-		if p.Name != name || p.Signer.Repository == "" || len(p.Signer.Refs) == 0 {
+		if p.Name != name || len(p.Channels) == 0 {
 			t.Fatalf("product %q is incomplete: %+v", name, p)
+		}
+		for _, c := range p.Channels {
+			if c.Signer.Repository == "" || len(c.Signer.Refs) == 0 || len(c.Paths) == 0 || c.Version == "" {
+				t.Fatalf("product %q channel %q is incomplete: %+v", name, c.Name, c)
+			}
 		}
 	}
 }
@@ -138,7 +160,7 @@ func TestSignedManifestVerifies(t *testing.T) {
 			setRequired(t, "cli", required)
 			warns := captureWarnings(t)
 			m := manifestJSON("cli", "https://dist.inference.sh/cli/v1.2.0/belt.tar.gz", goodSHA)
-			url, _ := serve(t, "/cli/manifest.json", m, f.sign(devIdentity, OIDCIssuer, m))
+			url, _ := serve(t, "/cli/manifest.json", m, f.sign(cliMain, OIDCIssuer, m))
 
 			info, err := CheckVersion(url, "linux", "amd64", "v1.0.0")
 			if err != nil {
@@ -163,17 +185,21 @@ func TestRefused(t *testing.T) {
 		identity string
 		issuer   string
 	}{
-		{"tampered url", manifestJSON("cli", "https://evil.example/belt.tar.gz", goodSHA), genuine, devIdentity, OIDCIssuer},
-		{"tampered sha256", manifestJSON("cli", "https://dist.inference.sh/cli/v1.2.0/belt.tar.gz", strings.Repeat("b", 64)), genuine, devIdentity, OIDCIssuer},
+		{"tampered url", manifestJSON("cli", "https://evil.example/belt.tar.gz", goodSHA), genuine, cliMain, OIDCIssuer},
+		{"tampered sha256", manifestJSON("cli", "https://dist.inference.sh/cli/v1.2.0/belt.tar.gz", strings.Repeat("b", 64)), genuine, cliMain, OIDCIssuer},
 		{"other branch", genuine, genuine, "https://github.com/inference-sh/cli/.github/workflows/release.yml@refs/heads/attacker", OIDCIssuer},
+		{"dev signs cli stable", genuine, genuine, cliDev, OIDCIssuer},
+		{"no channel", manifestFor("cli", "", "v1.2.0", "u", goodSHA), manifestFor("cli", "", "v1.2.0", "u", goodSHA), cliMain, OIDCIssuer},
+		{"canary channel on cli", manifestFor("cli", "canary", "v1.2.0-canary.0", "u", goodSHA), manifestFor("cli", "canary", "v1.2.0-canary.0", "u", goodSHA), cliMain, OIDCIssuer},
+		{"prerelease version on stable", manifestFor("cli", "stable", "v1.2.0-canary.0", "u", goodSHA), manifestFor("cli", "stable", "v1.2.0-canary.0", "u", goodSHA), cliMain, OIDCIssuer},
 		{"tag ref not allowed", genuine, genuine, "https://github.com/inference-sh/cli/.github/workflows/release.yml@refs/tags/v1.2.0", OIDCIssuer},
 		{"other workflow", genuine, genuine, "https://github.com/inference-sh/cli/.github/workflows/ci.yml@refs/heads/dev", OIDCIssuer},
 		{"other repo", genuine, genuine, "https://github.com/inference-sh/engine/.github/workflows/release.yml@refs/heads/dev", OIDCIssuer},
-		{"identity prefix", genuine, genuine, devIdentity + "x", OIDCIssuer},
-		{"other issuer", genuine, genuine, devIdentity, "https://accounts.google.com"},
-		{"wrong product", manifestJSON("engine", "u", goodSHA), manifestJSON("engine", "u", goodSHA), devIdentity, OIDCIssuer},
-		{"no product", manifestJSON("", "u", goodSHA), manifestJSON("", "u", goodSHA), devIdentity, OIDCIssuer},
-		{"signed but no sha256", manifestJSON("cli", "u", ""), manifestJSON("cli", "u", ""), devIdentity, OIDCIssuer},
+		{"identity prefix", genuine, genuine, cliMain + "x", OIDCIssuer},
+		{"other issuer", genuine, genuine, cliMain, "https://accounts.google.com"},
+		{"wrong product", manifestJSON("engine", "u", goodSHA), manifestJSON("engine", "u", goodSHA), cliMain, OIDCIssuer},
+		{"no product", manifestJSON("", "u", goodSHA), manifestJSON("", "u", goodSHA), cliMain, OIDCIssuer},
+		{"signed but no sha256", manifestJSON("cli", "u", ""), manifestJSON("cli", "u", ""), cliMain, OIDCIssuer},
 	}
 	for _, tc := range cases {
 		for _, required := range []bool{false, true} {
@@ -195,7 +221,7 @@ func TestEngineIdentityCannotSignCLI(t *testing.T) {
 	// one that says "cli".
 	f := newFakeSigstore(t)
 	m := manifestJSON("cli", "u", goodSHA)
-	url, _ := serve(t, "/cli/manifest.json", m, f.sign(Products["engine"].Signer.Identity("refs/heads/dev"), OIDCIssuer, m))
+	url, _ := serve(t, "/cli/manifest.json", m, f.sign(engineMain, OIDCIssuer, m))
 	if _, err := CheckVersion(url, "linux", "amd64", "v1.0.0"); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("err = %v, want ErrBadSignature", err)
 	}
@@ -286,18 +312,24 @@ func TestVerifyManifestFiles(t *testing.T) {
 		return p
 	}
 	mp := write("manifest.json", m)
-	bp := write("manifest.json.sigstore.json", f.sign(devIdentity, OIDCIssuer, m))
-	san, err := VerifyManifestFiles(mp, bp, "cli")
-	if err != nil || san != devIdentity {
+	bp := write("manifest.json.sigstore.json", f.sign(cliMain, OIDCIssuer, m))
+	san, err := VerifyManifestFiles(mp, bp, "cli", "v1.2.0/manifest.json", "manifest.json")
+	if err != nil || san != cliMain {
 		t.Fatalf("san=%q err=%v", san, err)
 	}
-	if _, err := VerifyManifestFiles(mp, bp, "engine"); !errors.Is(err, ErrBadSignature) {
+	if _, err := VerifyManifestFiles(mp, bp, "cli", "manifest.json", "v1.2.1/manifest.json"); !errors.Is(err, ErrBadSignature) {
+		t.Fatalf("another version's path: err = %v, want ErrBadSignature", err)
+	}
+	if _, err := VerifyManifestFiles(mp, bp, "cli"); err == nil {
+		t.Fatal("no dist path: want an error")
+	}
+	if _, err := VerifyManifestFiles(mp, bp, "engine", "manifest.json"); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("engine: err = %v, want ErrBadSignature", err)
 	}
 	empty := manifestJSON("cli", "u", "")
 	mp2 := write("m2.json", empty)
-	bp2 := write("m2.json.sigstore.json", f.sign(devIdentity, OIDCIssuer, empty))
-	if _, err := VerifyManifestFiles(mp2, bp2, "cli"); !errors.Is(err, ErrBadSignature) {
+	bp2 := write("m2.json.sigstore.json", f.sign(cliMain, OIDCIssuer, empty))
+	if _, err := VerifyManifestFiles(mp2, bp2, "cli", "manifest.json"); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("no sha256: err = %v, want ErrBadSignature", err)
 	}
 }
@@ -318,30 +350,34 @@ func TestRealPublicGoodBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	goreleaser := Product{Name: "goreleaser", Signer: Signer{
-		Repository: "goreleaser/goreleaser",
-		Workflow:   ".github/workflows/release.yml",
-		Refs:       []string{"refs/tags/v2.20.2"},
-	}}
+	signedBy := func(ref string) Product {
+		return Product{Name: "goreleaser", Channels: []Channel{{
+			Name:    "stable",
+			Signer:  Signer{Repository: "goreleaser/goreleaser", Workflow: ".github/workflows/release.yml", Refs: []string{ref}},
+			Paths:   []string{"checksums.txt"},
+			Version: ".*",
+		}}}
+	}
+	goreleaser := signedBy("refs/tags/v2.20.2")
 
 	// The signature, certificate chain, SCT, Rekor entry and identity all
 	// verify; what fails is the product check, since checksums.txt is not a
 	// manifest.
-	_, err = VerifyManifest(artifact, b, goreleaser)
+	_, err = VerifyManifest(artifact, b, goreleaser, "checksums.txt")
 	if err == nil || !strings.Contains(err.Error(), "parse signed manifest") {
 		t.Fatalf("err = %v, want it to get as far as the product check", err)
 	}
 
 	for name, p := range map[string]Product{
 		"another signer": Products["cli"],
-		"another ref":    {Name: "goreleaser", Signer: Signer{Repository: "goreleaser/goreleaser", Workflow: ".github/workflows/release.yml", Refs: []string{"refs/heads/main"}}},
+		"another ref":    signedBy("refs/heads/main"),
 	} {
-		if _, err := VerifyManifest(artifact, b, p); !errors.Is(err, ErrBadSignature) {
+		if _, err := VerifyManifest(artifact, b, p, "checksums.txt"); !errors.Is(err, ErrBadSignature) {
 			t.Fatalf("%s: err = %v, want ErrBadSignature", name, err)
 		}
 	}
 	tampered := append([]byte("x"), artifact...)
-	if _, err := VerifyManifest(tampered, b, goreleaser); !errors.Is(err, ErrBadSignature) {
+	if _, err := VerifyManifest(tampered, b, goreleaser, "checksums.txt"); !errors.Is(err, ErrBadSignature) {
 		t.Fatalf("tampered: err = %v, want ErrBadSignature", err)
 	}
 }
@@ -381,22 +417,84 @@ func TestSelfCheck(t *testing.T) {
 	if err := os.WriteFile(mp, m, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(bp, f.sign(devIdentity, OIDCIssuer, m), 0o600); err != nil {
+	if err := os.WriteFile(bp, f.sign(cliMain, OIDCIssuer, m), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if code, ok := RunSelfCheck([]string{"belt", SelfCheckCommand, "cli", mp, bp}, "v1.2.0"); !ok || code != 0 {
+	if code, ok := RunSelfCheck([]string{"belt", SelfCheckCommand, "cli", mp, bp, "manifest.json"}, "v1.2.0"); !ok || code != 0 {
 		t.Fatalf("code=%d ok=%v", code, ok)
 	}
-	if code, _ := RunSelfCheck([]string{"belt", SelfCheckCommand, "cli", mp, bp}, "v1.1.0"); code != 1 {
+	if code, _ := RunSelfCheck([]string{"belt", SelfCheckCommand, "cli", mp, bp, "manifest.json"}, "v1.1.0"); code != 1 {
 		t.Fatalf("version mismatch: code=%d, want 1", code)
 	}
-	if code, _ := RunSelfCheck([]string{"belt", SelfCheckCommand, "engine", mp, bp}, "v1.2.0"); code != 1 {
+	if code, _ := RunSelfCheck([]string{"belt", SelfCheckCommand, "engine", mp, bp, "manifest.json"}, "v1.2.0"); code != 1 {
 		t.Fatalf("wrong product: code=%d, want 1", code)
 	}
-	if code, _ := RunSelfCheck([]string{"belt", SelfCheckCommand, "cli"}, "v1.2.0"); code != 2 {
+	if code, _ := RunSelfCheck([]string{"belt", SelfCheckCommand, "cli", mp, bp}, "v1.2.0"); code != 2 {
 		t.Fatalf("usage: code=%d, want 2", code)
 	}
 	if _, ok := RunSelfCheck([]string{"belt", "version"}, "v1.2.0"); ok {
 		t.Fatal("handled an ordinary command")
+	}
+}
+
+// The channel table: each engine channel is accepted only at its own paths,
+// signed from its own branch, with its own kind of version. A dev-signed
+// manifest is never accepted as stable.
+func TestEngineChannels(t *testing.T) {
+	stable := manifestFor("engine", "stable", "v1.2.0", "u", goodSHA)
+	canary := manifestFor("engine", "canary", "v1.2.0-canary.3", "u", goodSHA)
+	devStable := manifestFor("engine", "stable", "v1.2.0", "u", goodSHA)
+	devCanaryStableVersion := manifestFor("engine", "canary", "v1.2.0", "u", goodSHA)
+	cases := []struct {
+		name     string
+		path     string
+		manifest []byte
+		identity string
+		ok       bool
+	}{
+		{"stable head, main", "/engine/manifest.json", stable, engineMain, true},
+		{"stable version, main", "/engine/v1.2.0/manifest.json", stable, engineMain, true},
+		{"canary head, dev", "/engine/channels/canary.json", canary, engineDev, true},
+		{"canary version, dev", "/engine/v1.2.0-canary.3/manifest.json", canary, engineDev, true},
+
+		{"canary served as stable head", "/engine/manifest.json", canary, engineDev, false},
+		{"dev signs a stable manifest", "/engine/manifest.json", devStable, engineDev, false},
+		{"dev signs stable at a version path", "/engine/v1.2.0/manifest.json", devStable, engineDev, false},
+		{"dev canary with a stable version", "/engine/v1.2.0/manifest.json", devCanaryStableVersion, engineDev, false},
+		{"stable served as canary head", "/engine/channels/canary.json", stable, engineMain, false},
+		{"main signs a canary", "/engine/channels/canary.json", canary, engineMain, false},
+		{"another version's path", "/engine/v1.2.1/manifest.json", stable, engineMain, false},
+		{"another canary's path", "/engine/v1.2.0-canary.4/manifest.json", canary, engineDev, false},
+		{"unknown path", "/engine/channels/beta.json", canary, engineDev, false},
+		{"cli workflow signs engine", "/engine/manifest.json", stable, cliMain, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeSigstore(t)
+			url, _ := serve(t, tc.path, tc.manifest, f.sign(tc.identity, OIDCIssuer, tc.manifest))
+			info, err := CheckVersion(url, "linux", "amd64", "v1.0.0")
+			if tc.ok {
+				if err != nil || !info.Signed {
+					t.Fatalf("info=%+v err=%v, want a verified manifest", info, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrBadSignature) {
+				t.Fatalf("err = %v, want ErrBadSignature", err)
+			}
+		})
+	}
+}
+
+func TestDistPathFromURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://dist.inference.sh/engine/channels/canary.json?x=1": "channels/canary.json",
+		"https://dist.inference.sh/engine/v1.2.3/manifest.json":     "v1.2.3/manifest.json",
+		"https://dist.inference.sh/cli/manifest.json":               "manifest.json",
+		"https://dist.inference.sh/manifest.json":                   "",
+	} {
+		if got := DistPathFromURL(in); got != want {
+			t.Errorf("DistPathFromURL(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
