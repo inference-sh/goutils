@@ -1,5 +1,29 @@
 package logging
 
+import "unicode/utf8"
+
+// Caps on audit fields a caller can choose freely (a request path as the
+// target, a User-Agent): unauthenticated requests write audit lines, and a
+// field as long as the request allows would multiply what each one costs.
+const (
+	maxAuditTargetID  = 1024
+	maxAuditUserAgent = 512
+)
+
+// truncateField cuts s to at most max bytes on a UTF-8 boundary, marking
+// the cut.
+func truncateField(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	const mark = "...[truncated]"
+	cut := max - len(mark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + mark
+}
+
 // AuditContext holds optional context for audit log entries.
 type AuditContext struct {
 	IP        string
@@ -17,6 +41,7 @@ func Audit(action, actorID, targetType, targetID, outcome string, ctx *AuditCont
 	if auditRoot != nil {
 		logger = auditRoot
 	}
+	targetID = truncateField(targetID, maxAuditTargetID)
 	event := logger.Info().
 		Str("component", "audit").
 		Str("action", action).
@@ -30,7 +55,7 @@ func Audit(action, actorID, targetType, targetID, outcome string, ctx *AuditCont
 			event = event.Str("ip", ctx.IP)
 		}
 		if ctx.UserAgent != "" {
-			event = event.Str("user_agent", ctx.UserAgent)
+			event = event.Str("user_agent", truncateField(ctx.UserAgent, maxAuditUserAgent))
 		}
 		if ctx.SessionID != "" {
 			event = event.Str("session_id", ctx.SessionID)
