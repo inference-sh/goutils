@@ -48,6 +48,11 @@ type Config struct {
 	// so audit events reach the archive within the hour however few there
 	// are, and its rotated files archive under logs/audit/ (see ArchiveKey).
 	Audit bool
+
+	// AuditMaxBackups is how many rotated audit files are kept on disk.
+	// 0 means DefaultAuditMaxBackups. The archive, not the local disk, is
+	// the long-term audit record.
+	AuditMaxBackups int
 }
 
 // AuditFilename is the audit log's file name. Rotated copies are named
@@ -57,6 +62,11 @@ const AuditFilename = "audit.txt"
 // auditRotateEvery bounds how long an audit event waits on disk before its
 // file is rotated and becomes archivable.
 const auditRotateEvery = time.Hour
+
+// DefaultAuditMaxBackups keeps a week of hourly audit rotations. Without a
+// count lumberjack keeps every rotation for MaxAge days, so audit lines that
+// unauthenticated requests cause could fill the log volume.
+const DefaultAuditMaxBackups = 7 * 24
 
 // Root is the global logger. Set by Init(), defaults to stderr.
 // Every line it writes passes Redact (see redact.go).
@@ -112,12 +122,7 @@ func Init(cfg Config) error {
 
 	auditRoot = nil
 	if cfg.Audit {
-		auditFile := &lumberjack.Logger{
-			Filename: filepath.Join(cfg.Dir, AuditFilename),
-			MaxSize:  cfg.MaxSize,
-			MaxAge:   cfg.MaxAge,
-			Compress: cfg.Compress,
-		}
+		auditFile := newAuditRotator(cfg)
 		l := zerolog.New(RedactWriter(zerolog.MultiLevelWriter(append(writers, auditFile)...))).
 			With().Timestamp().Logger().
 			Level(zerolog.InfoLevel)
@@ -126,6 +131,21 @@ func Init(cfg Config) error {
 		go reopenWhenMoved(auditFile, reopenCheckEvery)
 	}
 	return nil
+}
+
+// newAuditRotator is the audit file's rotator for cfg.
+func newAuditRotator(cfg Config) *lumberjack.Logger {
+	backups := cfg.AuditMaxBackups
+	if backups <= 0 {
+		backups = DefaultAuditMaxBackups
+	}
+	return &lumberjack.Logger{
+		Filename:   filepath.Join(cfg.Dir, AuditFilename),
+		MaxSize:    cfg.MaxSize,
+		MaxBackups: backups,
+		MaxAge:     cfg.MaxAge,
+		Compress:   cfg.Compress,
+	}
 }
 
 // reopenCheckEvery bounds how long a process writes to a log file another
