@@ -30,6 +30,12 @@ type Session struct {
 	pendingCalls  []ToolCall
 	pendingResult []ToolResult
 	resultCount   int
+
+	// Terminate requests from the hooks for the current batch: one entry
+	// per pending call for BeforeToolCall (all must set it), one flag for
+	// AfterToolCall (any may set it). ShouldContinue reads them.
+	beforeTerminate []bool
+	afterTerminate  bool
 }
 
 // SessionOption configures a Session.
@@ -168,6 +174,7 @@ func (s *Session) HandleResponse(ctx context.Context, resp StreamResponse) []Too
 		s.pendingCalls = nil
 		s.pendingResult = nil
 		s.resultCount = 0
+		s.resetTerminate(0)
 		return nil
 	}
 
@@ -175,6 +182,7 @@ func (s *Session) HandleResponse(ctx context.Context, resp StreamResponse) []Too
 	s.pendingCalls = calls
 	s.pendingResult = make([]ToolResult, len(calls))
 	s.resultCount = 0
+	s.resetTerminate(len(calls))
 
 	// Emit tool_call events
 	for _, tc := range calls {
@@ -201,12 +209,22 @@ func (s *Session) BeforeToolCall(ctx context.Context, call ToolCall) (*BeforeToo
 	}
 	s.mu.Unlock()
 
-	return s.hooks.BeforeToolCall(ctx, BeforeToolCallContext{
+	res, err := s.hooks.BeforeToolCall(ctx, BeforeToolCallContext{
 		TurnNumber: turn,
 		Call:       call,
 		Assistant:  assistant,
 		Messages:   messages,
 	})
+	if err == nil && res != nil && res.Terminate {
+		s.mu.Lock()
+		for i, tc := range s.pendingCalls {
+			if tc.ID == call.ID && i < len(s.beforeTerminate) {
+				s.beforeTerminate[i] = true
+			}
+		}
+		s.mu.Unlock()
+	}
+	return res, err
 }
 
 // HandleToolResult records a tool result and runs the AfterToolCall hook.
@@ -254,6 +272,11 @@ func (s *Session) HandleToolResult(ctx context.Context, callID string, result To
 			if after.IsError != nil {
 				result.IsError = *after.IsError
 			}
+			if after.Terminate {
+				s.mu.Lock()
+				s.afterTerminate = true
+				s.mu.Unlock()
+			}
 		}
 	}
 
@@ -292,6 +315,17 @@ func (s *Session) HandleToolResult(ctx context.Context, callID string, result To
 func (s *Session) ShouldContinue(ctx context.Context) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// A tool hook asked to stop after this batch. Like ShouldStop,
+	// follow-ups queued for after the stop still run.
+	if s.terminateRequested() {
+		drained := s.followUp.Drain()
+		if len(drained) > 0 {
+			s.messages = append(s.messages, drained...)
+			return true
+		}
+		return false
+	}
 
 	// Check custom stop hook
 	if s.hooks.ShouldStop != nil {
@@ -378,7 +412,36 @@ func (s *Session) AdvanceTurn(ctx context.Context) error {
 	s.pendingCalls = nil
 	s.pendingResult = nil
 	s.resultCount = 0
+	s.resetTerminate(0)
 	return nil
+}
+
+// resetTerminate clears the hooks' terminate requests for a batch of n calls.
+// Callers hold s.mu.
+func (s *Session) resetTerminate(n int) {
+	s.beforeTerminate = make([]bool, n)
+	s.afterTerminate = false
+}
+
+// terminateRequested reports whether the current batch should be the last:
+// AfterToolCall set Terminate for any call, or BeforeToolCall set it for
+// every call. Callers hold s.mu.
+func (s *Session) terminateRequested() bool {
+	if len(s.pendingCalls) == 0 {
+		return false
+	}
+	if s.afterTerminate {
+		return true
+	}
+	if len(s.beforeTerminate) != len(s.pendingCalls) {
+		return false
+	}
+	for _, t := range s.beforeTerminate {
+		if !t {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

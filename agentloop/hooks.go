@@ -107,6 +107,9 @@ type AfterToolCallContext struct {
 type AfterToolCallResult struct {
 	Content   *string // nil = keep original
 	IsError   *bool   // nil = keep original
+
+	// Terminate stops the loop after the current tool batch. Any tool call
+	// in the batch setting it is enough.
 	Terminate bool
 }
 
