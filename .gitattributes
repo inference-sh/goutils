@@ -1,0 +1,4 @@
+# Signed test fixtures must be checked out byte-for-byte: their signatures
+# cover the exact bytes, and core.autocrlf=true (the Windows runner default)
+# would rewrite LF to CRLF.
+updater/testdata/** -text
